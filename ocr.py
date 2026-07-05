@@ -431,6 +431,11 @@ class OCRApp:
         self.history_data = self.store.get('history', [])
         self._pending_history_book_page = None
         self._suppress_book_page_trace = False
+        # 历史文件名索引（用于快速去重）
+        self._history_names_set = {
+            frozenset(f.get('name', '') for f in item.get('files', []))
+            for item in self.history_data
+        }
         
         # 尺寸限制解锁状态
         self.size_limit_unlocked = False
@@ -2101,6 +2106,12 @@ class OCRApp:
             messagebox.showwarning('警告', '请先选择图片文件！')
             return
         mode = getattr(self, '_selected_ocr_mode', tk.StringVar()).get()
+
+        # 识别前检查：当前图片是否已有历史记录
+        current_names = frozenset(os.path.basename(p) for p in self.image_paths)
+        if current_names in self._history_names_set:
+            self.show_toast('⚠️ 该图片已有识别记录，已跳过', duration=3000)
+            return
 
         # 识别完成的回调：解析并跳到交互绘图
         def _after_ocr():
@@ -9865,15 +9876,13 @@ class OCRApp:
                 history_item['files'].append(file_info)
                 print(f"  - {result['file']}: {result['count']} 行")
 
-            # 检查是否与任意一条历史记录重复
+            # 检查是否与任意一条历史记录重复（不比较页码，只比较内容）
             for existing in self.history_data:
                 if (existing.get('type') == ocr_type
                         and existing.get('file_count') == history_item['file_count']
-                        and existing.get('total_lines') == history_item['total_lines']
-                        and existing.get('book_name') == book_name
-                        and existing.get('page_no') == history_item['page_no']):
-                    existing_files = [(f['name'], f['lines']) for f in existing.get('files', [])]
-                    new_files      = [(f['name'], f['lines']) for f in history_item['files']]
+                        and existing.get('total_lines') == history_item['total_lines']):
+                    existing_files = [(f['name'], f['lines'], f.get('content', [])) for f in existing.get('files', [])]
+                    new_files      = [(f['name'], f['lines'], f.get('content', [])) for f in history_item['files']]
                     if existing_files == new_files:
                         print("⚠️ 与已有历史记录相同，跳过重复保存")
                         self.root.after(0, lambda: self.show_toast('⚠️ 与已有历史记录相同，已跳过', duration=3000))
@@ -9882,9 +9891,17 @@ class OCRApp:
             # 添加到历史记录列表开头
             self.history_data.insert(0, history_item)
 
+            # 同步更新文件名索引
+            new_key = frozenset(f.get('name', '') for f in history_item['files'])
+            self._history_names_set.add(new_key)
+
             # 限制历史记录数量
             if len(self.history_data) > self.history_limit:
+                removed = self.history_data[self.history_limit:]
                 self.history_data = self.history_data[:self.history_limit]
+                for item in removed:
+                    self._history_names_set.discard(
+                        frozenset(f.get('name', '') for f in item.get('files', [])))
 
             # 保存到文件
             self.save_history()

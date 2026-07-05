@@ -9865,19 +9865,18 @@ class OCRApp:
                 history_item['files'].append(file_info)
                 print(f"  - {result['file']}: {result['count']} 行")
 
-            # 检查是否与上一条记录重复（拼接后自动识别 + 手动再点的场景）
-            if self.history_data:
-                last = self.history_data[0]
-                if (last.get('type') == ocr_type
-                        and last.get('file_count') == history_item['file_count']
-                        and last.get('total_lines') == history_item['total_lines']
-                        and last.get('book_name') == book_name
-                        and last.get('page_no') == history_item['page_no']):
-                    # 进一步比较文件名列表
-                    last_files = [(f['name'], f['lines']) for f in last.get('files', [])]
-                    new_files  = [(f['name'], f['lines']) for f in history_item['files']]
-                    if last_files == new_files:
-                        print("⚠️ 与上一条历史记录相同，跳过重复保存")
+            # 检查是否与任意一条历史记录重复
+            for existing in self.history_data:
+                if (existing.get('type') == ocr_type
+                        and existing.get('file_count') == history_item['file_count']
+                        and existing.get('total_lines') == history_item['total_lines']
+                        and existing.get('book_name') == book_name
+                        and existing.get('page_no') == history_item['page_no']):
+                    existing_files = [(f['name'], f['lines']) for f in existing.get('files', [])]
+                    new_files      = [(f['name'], f['lines']) for f in history_item['files']]
+                    if existing_files == new_files:
+                        print("⚠️ 与已有历史记录相同，跳过重复保存")
+                        self.root.after(0, lambda: self.show_toast('⚠️ 与已有历史记录相同，已跳过', duration=3000))
                         return
 
             # 添加到历史记录列表开头

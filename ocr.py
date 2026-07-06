@@ -8240,6 +8240,16 @@ class OCRApp:
                     tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
                     tmp.close()
                     merged_image.save(tmp.name)
+                    if choice == 'save':
+                        try:
+                            filename = self._make_image_filename('截图拼接', '.png')
+                            save_dir = self.merge_save_path or os.path.expanduser('~\\Pictures')
+                            os.makedirs(save_dir, exist_ok=True)
+                            save_path = os.path.join(save_dir, filename)
+                            merged_image.save(save_path)
+                            self.show_toast(f'✓ 已保存：{filename}')
+                        except Exception as e:
+                            print(f'截图保存失败: {e}')
                     self.image_paths = [tmp.name]
                     self.file_label.config(
                         text=f'截图拼接：{total_width}×{max_height} px，{len(images)} 张', fg='#1E5A8A')
@@ -8259,8 +8269,7 @@ class OCRApp:
                     temp_path = os.path.join(temp_dir, f"cropped_merged_ocr_{timestamp}.jpg")
                     merged_image.save(temp_path, format='JPEG', quality=90)
                     if choice == 'save':
-                        timestamp = datetime.now().strftime('%m-%d-%H-%M-%S')
-                        filename = f'crop_{len(images)}w{total_width}h{max_height}_{timestamp}.jpg'
+                        filename = self._make_image_filename(f'裁剪{len(images)}张')
                         save_dir = self.merge_save_path or os.path.expanduser('~\\Pictures')
                         os.makedirs(save_dir, exist_ok=True)
                         merged_image.save(os.path.join(save_dir, filename), format='JPEG', quality=95)
@@ -11977,7 +11986,6 @@ class OCRApp:
     def _run_ocr_by_mode(self, mode, delay=500):
         """根据模式字符串调度识别"""
         self._capture_history_book_page()
-        self._increment_book_page_for_import(1)
         if mode == 'basic':
             self.root.after(delay, self.perform_quick_ocr)
         elif mode == 'general':
@@ -11985,21 +11993,40 @@ class OCRApp:
         else:
             self.root.after(delay, self.perform_ocr)
 
+    def _make_image_filename(self, prefix, ext='.jpg'):
+        """生成带书名+页码的文件名，格式：书名_第N页_前缀_时间戳"""
+        book = ''
+        page = ''
+        if hasattr(self, '_book_name_var'):
+            book = self._book_name_var.get().strip()
+        if hasattr(self, '_book_page_var'):
+            try:
+                page = int(self._book_page_var.get())
+            except (ValueError, TypeError):
+                page = ''
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        parts = []
+        if book:
+            parts.append(book)
+        if page != '':
+            parts.append(f'第{page}页')
+        parts.append(prefix)
+        parts.append(timestamp)
+        return '_'.join(parts) + ext
+
     def _save_merged_image(self, merged_image, image_count, total_width, max_height):
         """根据是否设置了保存路径，直接保存或弹出对话框。返回保存路径或 None"""
         if self.merge_save_path:
-            # 直接保存到预设目录
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'merged_{image_count}images_{total_width}x{max_height}_{timestamp}.jpg'
+            filename = self._make_image_filename(f'拼接{image_count}张')
             save_path = os.path.join(self.merge_save_path, filename)
             merged_image.save(save_path, format='JPEG', quality=95)
             return save_path
         else:
-            # 弹出保存对话框
+            default_name = self._make_image_filename(f'拼接{image_count}张')
             save_path = filedialog.asksaveasfilename(
                 defaultextension=".jpg",
                 filetypes=[("JPEG图片", "*.jpg"), ("PNG图片", "*.png"), ("所有文件", "*.*")],
-                initialfile=f"merged_{image_count}images_{total_width}x{max_height}.jpg"
+                initialfile=default_name
             )
             if not save_path:
                 return None
@@ -12394,6 +12421,15 @@ class OCRApp:
                 tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
                 tmp.close()
                 merged.save(tmp.name)
+                # 有预设保存目录时自动保存一份
+                if self.merge_save_path:
+                    try:
+                        filename = self._make_image_filename('截图拼接', '.png')
+                        save_path = os.path.join(self.merge_save_path, filename)
+                        merged.save(save_path)
+                        self.show_toast(f'✓ 已保存：{filename}')
+                    except Exception as e:
+                        print(f'截图自动保存失败: {e}')
                 self.image_paths = [tmp.name]
                 self.all_results = []
                 self.file_label.config(
@@ -12413,10 +12449,12 @@ class OCRApp:
                 self._nav_to('OCR识别')
 
             def save_merged():
+                default_name = self._make_image_filename('截图拼接', '.png')
                 path = filedialog.asksaveasfilename(
                     defaultextension='.png',
                     filetypes=[('PNG 图片', '*.png'), ('JPEG 图片', '*.jpg'), ('所有文件', '*.*')],
-                    title='保存拼接图片'
+                    title='保存拼接图片',
+                    initialfile=default_name
                 )
                 if path:
                     merged.save(path)
@@ -12925,9 +12963,7 @@ class OCRApp:
                         merged.save(temp_path, format='JPEG', quality=90)
 
                         if user_choice == 'save':
-                            # 用时间戳自动命名，不弹对话框
-                            timestamp = datetime.now().strftime('%m-%d-%H-%M-%S')
-                            filename = f'crop_{len(cropped_images)}w{total_width}h{max_height}_{timestamp}.jpg'
+                            filename = self._make_image_filename(f'裁剪{len(cropped_images)}张')
                             save_dir = self.merge_save_path or os.path.expanduser('~\\Pictures')
                             os.makedirs(save_dir, exist_ok=True)
                             save_path = os.path.join(save_dir, filename)

@@ -431,11 +431,6 @@ class OCRApp:
         self.history_data = self.store.get('history', [])
         self._pending_history_book_page = None
         self._suppress_book_page_trace = False
-        # 历史文件名索引（用于快速去重）
-        self._history_names_set = {
-            frozenset(f.get('name', '') for f in item.get('files', []))
-            for item in self.history_data
-        }
         
         # 尺寸限制解锁状态
         self.size_limit_unlocked = False
@@ -2107,12 +2102,6 @@ class OCRApp:
             return
         mode = getattr(self, '_selected_ocr_mode', tk.StringVar()).get()
 
-        # 识别前检查：当前图片是否已有历史记录
-        current_names = frozenset(os.path.basename(p) for p in self.image_paths)
-        if current_names in self._history_names_set:
-            self.show_toast('⚠️ 该图片已有识别记录，已跳过', duration=3000)
-            return
-
         # 识别完成的回调：解析并跳到交互绘图
         def _after_ocr():
             self.copy_and_parse_text()
@@ -2364,7 +2353,7 @@ class OCRApp:
         )(on_choice)
 
     def _build_gallery_page(self):
-        """构建图片预览页——显示所有已识别图片的缩略图，自适应工作区宽度"""
+        """构建图片预览页——拼接历史 + 已识别图片统一网格展示"""
         page = self._page_gallery
         for c in page.winfo_children():
             c.destroy()
@@ -2380,40 +2369,26 @@ class OCRApp:
                   font=('Microsoft YaHei', 9), padx=10, pady=4,
                   cursor='hand2').pack(side=tk.RIGHT)
 
-        # 拼接历史记录区域（始终显示）
-        hist_frame = tk.Frame(page, bg='#F7F9FC',
-                              highlightthickness=1, highlightbackground='#E5E7EB')
-        hist_frame.pack(fill=tk.X, padx=24, pady=(0, 10))
-        tk.Label(hist_frame, text='↩ 拼接历史', bg='#F7F9FC', fg='#6B7280',
-                 font=('Microsoft YaHei', 9, 'bold')).pack(side=tk.LEFT, padx=(10, 8), pady=6)
-        history = getattr(self, '_merge_history', [])
-        if history:
-            for i, entry in enumerate(history):
-                tag = '最近' if i == 0 else f'#{i+1}'
-                tip = f"[{entry['label']}] {entry['desc']}  {entry['time']}"
-                btn = tk.Button(hist_frame, text=f"{tag}  {tip}",
-                                command=lambda e=entry: self._reopen_merge_entry(e),
-                                bg='#EFF6FF', fg='#1A6FD4', relief='flat',
-                                font=('Microsoft YaHei', 8), padx=8, pady=3,
-                                cursor='hand2', anchor='w')
-                btn.pack(side=tk.LEFT, padx=(0, 6), pady=6)
-        else:
-            tk.Label(hist_frame, text='暂无记录，执行拼接/截图/裁剪后自动保存', bg='#F7F9FC', fg='#9CA3AF',
-                     font=('Microsoft YaHei', 8)).pack(side=tk.LEFT, pady=6)
+        # 收集所有卡片数据
+        # 格式: {'type': 'merge'|'ocr', ...}
+        cards = []
 
-        # 收集所有已处理的图片路径
+        # 1. 拼接历史（置顶）
+        for entry in getattr(self, '_merge_history', []):
+            cards.append({'type': 'merge', 'entry': entry})
+
+        # 2. 已识别图片
         seen = set()
-        img_paths = []
         for r in (getattr(self, 'all_results', []) or []):
             p = r.get('path', '')
             if p and os.path.exists(p) and p not in seen:
                 seen.add(p)
-                img_paths.append(p)
+                cards.append({'type': 'ocr', 'path': p})
 
-        if not img_paths:
+        if not cards:
             empty = tk.Frame(page, bg='white')
             empty.pack(fill=tk.BOTH, expand=True)
-            tk.Label(empty, text='暂无图片\n\n请先执行 OCR 识别',
+            tk.Label(empty, text='暂无图片\n\n请先执行 OCR 识别或拼接/截图/裁剪',
                      bg='white', fg='#9CA3AF',
                      font=('Microsoft YaHei', 12)).pack(expand=True)
             return
@@ -2428,7 +2403,6 @@ class OCRApp:
         inner = tk.Frame(canvas, bg='white')
         win_id = canvas.create_window((0, 0), window=inner, anchor='nw', tags='inner')
 
-        # 内层宽度跟随 Canvas 宽度
         def _on_canvas_configure(e):
             canvas.itemconfig(win_id, width=e.width)
         canvas.bind('<Configure>', _on_canvas_configure, add='+')
@@ -2437,7 +2411,6 @@ class OCRApp:
             canvas.configure(scrollregion=canvas.bbox('all'))
         inner.bind('<Configure>', _on_inner_configure, add='+')
 
-        # 鼠标滚轮
         def _on_mousewheel(e):
             canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
         canvas.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _on_mousewheel))
@@ -2445,84 +2418,139 @@ class OCRApp:
 
         from PIL import ImageTk
 
-        CARD_W = 200  # 卡片固定宽度
-        GAP = 8       # 卡片间距
+        CARD_W = 160
+        GAP = 8
+        THUMB_W = CARD_W - 12
 
-        # 布局函数：根据 inner 的实际宽度动态排列卡片
-        _gallery_state = {'row_frame': None, 'col': 0, 'cols': 1}
+        # 角标颜色
+        TAG_COLORS = {
+            'file':       ('#1A6FD4', '文件拼接'),
+            'screenshot': ('#7C3AED', '截图拼接'),
+            'crop':       ('#D97706', '裁剪拼接'),
+            'ocr':        ('#16A34A', '已识别'),
+        }
 
-        def _layout_gallery():
-            # 清空
-            for w in inner.winfo_children():
-                w.destroy()
-            _gallery_state['row_frame'] = None
-            _gallery_state['col'] = 0
+        if not hasattr(self, '_gallery_thumbs'):
+            self._gallery_thumbs = []
+        self._gallery_thumbs.clear()
 
-            iw = inner.winfo_width()
-            _gallery_state['cols'] = max(1, (iw - 4) // (CARD_W + GAP))
+        _state = {'row_frame': None, 'col': 0, 'cols': 1}
 
-            for path in img_paths:
-                col = _gallery_state['col']
-                if col % _gallery_state['cols'] == 0:
-                    rf = tk.Frame(inner, bg='white')
-                    rf.pack(fill=tk.X, padx=2, pady=(4, 0))
-                    _gallery_state['row_frame'] = rf
+        def _make_card(parent, card):
+            """创建一个卡片 Frame"""
+            thumb_img = None
+            label_text = ''
+            size_text = ''
+            badge_key = card['type']
+
+            try:
+                if card['type'] == 'merge':
+                    entry = card['entry']
+                    badge_key = entry['type']
+                    data = entry.get('data', [])
+                    if data:
+                        src = Image.open(data[0]) if entry['type'] == 'file' else data[0]
+                        img = src.copy()
+                        img.thumbnail((THUMB_W, THUMB_W), Image.Resampling.LANCZOS)
+                        thumb_img = ImageTk.PhotoImage(img)
+                        self._gallery_thumbs.append(thumb_img)
+                    label_text = entry['desc']
+                    size_text = entry['time']
                 else:
-                    rf = _gallery_state['row_frame']
-
-                _gallery_state['col'] += 1
-
-                try:
+                    path = card['path']
                     img = Image.open(path)
                     pw, ph = img.size
-                    img.thumbnail((CARD_W - 10, CARD_W - 10))
-                    photo = ImageTk.PhotoImage(img)
+                    img.thumbnail((THUMB_W, THUMB_W), Image.Resampling.LANCZOS)
+                    thumb_img = ImageTk.PhotoImage(img)
+                    self._gallery_thumbs.append(thumb_img)
+                    label_text = os.path.basename(path)
+                    size_text = f'{pw}×{ph} px'
+            except Exception:
+                pass
 
-                    card = tk.Frame(rf, bg='white', relief='solid',
-                                    bd=1, highlightbackground='#E5E7EB')
-                    card.pack(side=tk.LEFT, padx=(0, GAP), pady=4)
+            bg_col, badge_text = TAG_COLORS.get(badge_key, ('#6B7280', ''))
 
-                    thumb = tk.Label(card, image=photo, bg='white', cursor='hand2')
-                    thumb.image = photo
-                    thumb.pack(padx=4, pady=(4, 0))
+            card_frame = tk.Frame(parent, bg='white', relief='solid',
+                                  bd=1, highlightbackground='#E5E7EB')
+            card_frame.pack(side=tk.LEFT, padx=(0, GAP), pady=4)
 
-                    name = os.path.basename(path)
-                    tk.Label(card, text=name, bg='white', fg='#374151',
-                             font=('Microsoft YaHei', 9)).pack(pady=(2, 0))
-                    tk.Label(card, text=f'{pw}×{ph} px', bg='white', fg='#9CA3AF',
-                             font=('Microsoft YaHei', 8)).pack(pady=(0, 2))
+            # 缩略图区域（相对定位角标）
+            thumb_frame = tk.Frame(card_frame, bg='#F3F4F6',
+                                   width=CARD_W - 8, height=CARD_W - 8)
+            thumb_frame.pack(padx=4, pady=(4, 0))
+            thumb_frame.pack_propagate(False)
 
-                    btn_r = tk.Frame(card, bg='white')
-                    btn_r.pack(fill=tk.X, padx=4, pady=(0, 6))
-                    tk.Button(btn_r, text='🔍 查看',
-                              command=lambda p=path: self._preview_full_image(p),
-                              bg='#EFF6FF', fg='#1A6FD4', relief='flat',
-                              font=('Microsoft YaHei', 8), padx=6, pady=2,
-                              cursor='hand2').pack(side=tk.LEFT, padx=(0, 2))
-                    tk.Button(btn_r, text='📌',
-                              command=lambda p=path: self._popout_image_window(p),
-                              bg='#EFF6FF', fg='#1A6FD4', relief='flat',
-                              font=('Microsoft YaHei', 8), padx=6, pady=2,
-                              cursor='hand2').pack(side=tk.LEFT, padx=(0, 2))
-                    tk.Button(btn_r, text='💾 保存',
-                              command=lambda p=path: self._save_image_file(p),
-                              bg='#F0FDF4', fg='#16A34A', relief='flat',
-                              font=('Microsoft YaHei', 8), padx=6, pady=2,
-                              cursor='hand2').pack(side=tk.LEFT)
+            if thumb_img:
+                lbl = tk.Label(thumb_frame, image=thumb_img, bg='#F3F4F6', cursor='hand2')
+                lbl.place(relx=0.5, rely=0.5, anchor='center')
+                if card['type'] == 'merge':
+                    lbl.bind('<Button-1>', lambda e, en=card['entry']: self._reopen_merge_entry(en))
+                else:
+                    lbl.bind('<Button-1>', lambda e, p=card['path']: self._preview_full_image(p))
 
-                    thumb.bind('<Button-1>', lambda e, p=path: self._preview_full_image(p))
+            # 角标
+            tk.Label(thumb_frame, text=badge_text, bg=bg_col, fg='white',
+                     font=('Microsoft YaHei', 7), padx=4, pady=1).place(x=0, y=0)
 
-                except Exception as e:
-                    print(f'图片加载失败: {path} {e}')
+            # 文件名
+            tk.Label(card_frame, text=label_text, bg='white', fg='#374151',
+                     font=('Microsoft YaHei', 8),
+                     wraplength=CARD_W - 12, justify='center').pack(pady=(3, 0))
+            tk.Label(card_frame, text=size_text, bg='white', fg='#9CA3AF',
+                     font=('Microsoft YaHei', 7)).pack(pady=(0, 3))
 
-        # 初始布局 & 窗口缩放时重排
+            # 按钮行
+            btn_r = tk.Frame(card_frame, bg='white')
+            btn_r.pack(fill=tk.X, padx=4, pady=(0, 5))
+            if card['type'] == 'merge':
+                tk.Button(btn_r, text='↩ 重新打开',
+                          command=lambda en=card['entry']: self._reopen_merge_entry(en),
+                          bg='#EFF6FF', fg='#1A6FD4', relief='flat',
+                          font=('Microsoft YaHei', 7), padx=6, pady=2,
+                          cursor='hand2').pack(fill=tk.X)
+            else:
+                tk.Button(btn_r, text='🔍 查看',
+                          command=lambda p=card['path']: self._preview_full_image(p),
+                          bg='#EFF6FF', fg='#1A6FD4', relief='flat',
+                          font=('Microsoft YaHei', 7), padx=4, pady=2,
+                          cursor='hand2').pack(side=tk.LEFT, padx=(0, 2))
+                tk.Button(btn_r, text='📌',
+                          command=lambda p=card['path']: self._popout_image_window(p),
+                          bg='#EFF6FF', fg='#1A6FD4', relief='flat',
+                          font=('Microsoft YaHei', 7), padx=4, pady=2,
+                          cursor='hand2').pack(side=tk.LEFT, padx=(0, 2))
+                tk.Button(btn_r, text='💾',
+                          command=lambda p=card['path']: self._save_image_file(p),
+                          bg='#F0FDF4', fg='#16A34A', relief='flat',
+                          font=('Microsoft YaHei', 7), padx=4, pady=2,
+                          cursor='hand2').pack(side=tk.LEFT)
+
+        def _layout_gallery():
+            for w in inner.winfo_children():
+                w.destroy()
+            _state['row_frame'] = None
+            _state['col'] = 0
+
+            iw = inner.winfo_width()
+            _state['cols'] = max(1, (iw - 4) // (CARD_W + GAP))
+
+            for card in cards:
+                col = _state['col']
+                if col % _state['cols'] == 0:
+                    rf = tk.Frame(inner, bg='white')
+                    rf.pack(fill=tk.X, padx=2, pady=(4, 0))
+                    _state['row_frame'] = rf
+                else:
+                    rf = _state['row_frame']
+                _state['col'] += 1
+                _make_card(rf, card)
+
         def _delayed_layout():
             inner.update_idletasks()
             _layout_gallery()
 
         inner.after(150, _delayed_layout)
 
-        # 窗口大小变化后重排
         def _on_resize(e):
             if e.widget == page and e.width > 50:
                 _delayed_layout()
@@ -4037,7 +4065,9 @@ class OCRApp:
                 if conf_val > 0:
                     conf_threshold = self.store.get('conf_threshold', 0)
                     if conf_threshold > 0 and conf_val < conf_threshold:
-                        item_tags.append('low_conf')
+                        # 插到最前面，确保背景色优先级最高
+                        item_tags.insert(0, 'low_conf')
+                        conf_str = f'🔴 {conf_val:.0f}%'
 
                 self.tree.insert("", "end",
                                  values=(label_text, "☑" if group == 'C' else "☐", group, idx, category_label, category_key, conf_str),
@@ -5126,7 +5156,12 @@ class OCRApp:
     def show_toast(self, message, duration=3000):
         """右下角从右向左划入的 Toast 通知（正方形，与软件风格一致）"""
         try:
-            FIXED_SIZE = 200  # 正方形边长（像素）
+            if not hasattr(self, '_active_toasts'):
+                self._active_toasts = []
+            # 清理已销毁的toast
+            self._active_toasts = [t for t in self._active_toasts if t.winfo_exists()]
+
+            FIXED_SIZE = 200
             BLUE  = '#1A6FD4'
             WHITE = '#FFFFFF'
             DARK  = '#111827'
@@ -5138,26 +5173,21 @@ class OCRApp:
             toast.attributes('-topmost', True)
             toast.attributes('-alpha', 0.97)
 
-            # 外框：1px 蓝色边框
             outer = tk.Frame(toast, bg=BORDER, padx=1, pady=1,
                              width=FIXED_SIZE, height=FIXED_SIZE)
             outer.pack()
             outer.pack_propagate(False)
 
-            # 内容区：白底
             inner = tk.Frame(outer, bg=WHITE,
                              width=FIXED_SIZE - 2, height=FIXED_SIZE - 2)
             inner.pack(fill=tk.BOTH, expand=True)
             inner.pack_propagate(False)
 
-            # 顶部蓝色色条（4px）
             tk.Frame(inner, bg=BLUE, height=4).pack(fill=tk.X)
 
-            # 图标
             tk.Label(inner, text='✓', bg=WHITE, fg=BLUE,
                      font=('Microsoft YaHei', 22, 'bold')).pack(pady=(18, 4))
 
-            # 正文：自动换行，居中
             msg_lbl = tk.Label(inner, text=message, bg=WHITE, fg=DARK,
                      font=('Microsoft YaHei', 10),
                      wraplength=FIXED_SIZE - 28,
@@ -5170,9 +5200,16 @@ class OCRApp:
             sw = self.root.winfo_screenwidth()
             sh = self.root.winfo_screenheight()
             target_x = sw - tw - 24
-            y = sh - th - 60
+            # 根据当前活跃toast数量垂直错开
+            slot = len(self._active_toasts)
+            y = sh - th - 60 - slot * (th + 8)
 
-            # 从屏幕右侧外滑入
+            self._active_toasts.append(toast)
+
+            def _on_destroy():
+                if toast in self._active_toasts:
+                    self._active_toasts.remove(toast)
+
             start_x = sw
             toast.geometry(f'+{start_x}+{y}')
 
@@ -5186,12 +5223,15 @@ class OCRApp:
                 cur_x -= max(1, (cur_x - target_x) // 3 + 6)
                 toast.geometry(f'+{cur_x}+{y}')
                 toast.after(12, lambda: _slide_in(cur_x))
+                toast.geometry(f'+{cur_x}+{y}')
+                toast.after(12, lambda: _slide_in(cur_x))
 
             def _fade_out(alpha=0.97):
                 if not toast.winfo_exists():
                     return
                 alpha -= 0.06
                 if alpha <= 0:
+                    _on_destroy()
                     toast.destroy()
                 else:
                     toast.attributes('-alpha', alpha)
@@ -5199,9 +5239,9 @@ class OCRApp:
 
             # 点击任意位置关闭
             for w in (toast, outer, inner, msg_lbl):
-                w.bind('<Button-1>', lambda e: toast.destroy())
+                w.bind('<Button-1>', lambda e: (_on_destroy(), toast.destroy()))
             for child in inner.winfo_children():
-                child.bind('<Button-1>', lambda e: toast.destroy())
+                child.bind('<Button-1>', lambda e: (_on_destroy(), toast.destroy()))
 
             toast.after(10, lambda: _slide_in(start_x))
         except Exception:
@@ -7784,15 +7824,14 @@ class OCRApp:
 
         def close_and_run(action):
             option_window.destroy()
-            # 拖入图片后当前页 +1（取消则不递增）
-            if action != "cancel":
-                self._capture_history_book_page()
-                self._increment_book_page_for_import()
             if action == "accurate":
+                self._capture_history_book_page()
                 self._start_high_accuracy_recognition(image_files)
             elif action == "basic":
+                self._capture_history_book_page()
                 self._start_quick_recognition(image_files)
             elif action == "general":
+                self._capture_history_book_page()
                 self._start_general_recognition(image_files)
             elif action == "merge":
                 self._merge_images_from_drag(image_files)
@@ -8216,7 +8255,8 @@ class OCRApp:
                         return
                     import tempfile
                     temp_dir = tempfile.gettempdir()
-                    temp_path = os.path.join(temp_dir, "cropped_merged_ocr.jpg")
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    temp_path = os.path.join(temp_dir, f"cropped_merged_ocr_{timestamp}.jpg")
                     merged_image.save(temp_path, format='JPEG', quality=90)
                     if choice == 'save':
                         timestamp = datetime.now().strftime('%m-%d-%H-%M-%S')
@@ -8872,6 +8912,20 @@ class OCRApp:
                 success_idx = 0
                 for r in results_copy:
                     if r.get('count', 0) > 0 and not r.get('skipped', False):
+                        dup, dup_idx = self._is_duplicate_history([r])
+                        if dup:
+                            book = dup.get('book_name', '')
+                            page = dup.get('page_no', '')
+                            if page and book:
+                                msg = f'⚠️ 与《{book}》第 {page} 页重复，已跳过'
+                            elif page:
+                                msg = f'⚠️ 与第 {page} 页的历史记录重复，已跳过'
+                            elif book:
+                                msg = f'⚠️ 与《{book}》第 {dup_idx + 1} 条历史记录重复，已跳过'
+                            else:
+                                msg = f'⚠️ 与第 {dup_idx + 1} 条历史记录重复，已跳过'
+                            self.root.after(0, lambda m=msg: self.show_toast(m, duration=6000))
+                            continue
                         page_no = base_page + success_idx
                         self.root.after(0, lambda _r=r, _p=page_no: self.add_to_history('高精度识别', [_r], override_page=_p))
                         success_idx += 1
@@ -9164,6 +9218,20 @@ class OCRApp:
                 success_idx = 0
                 for r in results_copy:
                     if r.get('count', 0) > 0 and not r.get('skipped', False):
+                        dup, dup_idx = self._is_duplicate_history([r])
+                        if dup:
+                            book = dup.get('book_name', '')
+                            page = dup.get('page_no', '')
+                            if page and book:
+                                msg = f'⚠️ 与《{book}》第 {page} 页重复，已跳过'
+                            elif page:
+                                msg = f'⚠️ 与第 {page} 页的历史记录重复，已跳过'
+                            elif book:
+                                msg = f'⚠️ 与《{book}》第 {dup_idx + 1} 条历史记录重复，已跳过'
+                            else:
+                                msg = f'⚠️ 与第 {dup_idx + 1} 条历史记录重复，已跳过'
+                            self.root.after(0, lambda m=msg: self.show_toast(m, duration=6000))
+                            continue
                         page_no = base_page + success_idx
                         self.root.after(0, lambda _r=r, _p=page_no: self.add_to_history('通用识别', [_r], override_page=_p))
                         success_idx += 1
@@ -9352,6 +9420,20 @@ class OCRApp:
                 success_idx = 0
                 for r in results_copy:
                     if r.get('count', 0) > 0 and not r.get('skipped', False):
+                        dup, dup_idx = self._is_duplicate_history([r])
+                        if dup:
+                            book = dup.get('book_name', '')
+                            page = dup.get('page_no', '')
+                            if page and book:
+                                msg = f'⚠️ 与《{book}》第 {page} 页重复，已跳过'
+                            elif page:
+                                msg = f'⚠️ 与第 {page} 页的历史记录重复，已跳过'
+                            elif book:
+                                msg = f'⚠️ 与《{book}》第 {dup_idx + 1} 条历史记录重复，已跳过'
+                            else:
+                                msg = f'⚠️ 与第 {dup_idx + 1} 条历史记录重复，已跳过'
+                            self.root.after(0, lambda m=msg: self.show_toast(m, duration=6000))
+                            continue
                         page_no = base_page + success_idx
                         self.root.after(0, lambda _r=r, _p=page_no: self.add_to_history('快速识别', [_r], override_page=_p))
                         success_idx += 1
@@ -9815,14 +9897,17 @@ class OCRApp:
         except (ValueError, TypeError):
             return
         next_page = page_no + count
+        if next_page < 1:
+            next_page = 1
         self._suppress_book_page_trace = True
         try:
             self._book_page_var.set(str(next_page))
             self.store.set('book_page', next_page)
         finally:
             self._suppress_book_page_trace = False
-        # 弹出提示：当前页是 next_page - 1（即刚识别完的那页）
-        self.root.after(0, lambda p=next_page - 1: self.show_toast(f'📖 当前页：第 {p} 页', duration=5000))
+        # 只在正向递增时弹提示
+        if count > 0:
+            self.root.after(0, lambda p=next_page - 1: self.show_toast(f'📖 当前页：第 {p} 页', duration=5000))
 
     def _capture_history_book_page(self):
         """Remember the page number that belongs to the current import/recognition."""
@@ -9833,6 +9918,25 @@ class OCRApp:
             self._pending_history_book_page = int(self._book_page_var.get())
         except (ValueError, TypeError):
             self._pending_history_book_page = None
+
+    def _is_duplicate_history(self, results):
+        """同步判断识别结果是否与历史记录重复，返回 (重复的历史条目, 索引) 或 (None, None)"""
+        valid_results = [r for r in results if r.get('count', 0) > 0 and not r.get('skipped', False)]
+        new_hashes = [r.get('image_hash', '') for r in valid_results]
+        for idx, existing in enumerate(self.history_data):
+            existing_hashes = [f.get('image_hash', '') for f in existing.get('files', [])]
+            # 优先用 image_hash 比对
+            if all(existing_hashes) and all(new_hashes) and existing_hashes and new_hashes:
+                if existing_hashes == new_hashes:
+                    return existing, idx
+            # 无hash时退回内容比对（与 add_to_history 兜底逻辑一致）
+            else:
+                if existing.get('file_count') == len(valid_results):
+                    existing_files = [(f['name'], f['lines'], f.get('content', [])) for f in existing.get('files', [])]
+                    new_files = [(r['file'], r['count'], r['lines']) for r in valid_results]
+                    if existing_files == new_files:
+                        return existing, idx
+        return None, None
 
     def add_to_history(self, ocr_type, results, override_page=None):
         """添加识别结果到历史记录"""
@@ -9871,37 +9975,34 @@ class OCRApp:
                 file_info = {
                     'name': result['file'],
                     'lines': result['count'],
-                    'content': result['lines']  # 保存所有行
+                    'content': result['lines'],
+                    'image_hash': result.get('image_hash', '')
                 }
                 history_item['files'].append(file_info)
                 print(f"  - {result['file']}: {result['count']} 行")
 
-            # 检查是否与任意一条历史记录重复（不比较页码，只比较内容）
+            # 检查是否与任意一条历史记录重复（用image_hash比对，无hash则退回内容比对）
             for existing in self.history_data:
-                if (existing.get('type') == ocr_type
-                        and existing.get('file_count') == history_item['file_count']
-                        and existing.get('total_lines') == history_item['total_lines']):
-                    existing_files = [(f['name'], f['lines'], f.get('content', [])) for f in existing.get('files', [])]
-                    new_files      = [(f['name'], f['lines'], f.get('content', [])) for f in history_item['files']]
-                    if existing_files == new_files:
-                        print("⚠️ 与已有历史记录相同，跳过重复保存")
-                        self.root.after(0, lambda: self.show_toast('⚠️ 与已有历史记录相同，已跳过', duration=3000))
+                existing_hashes = [f.get('image_hash', '') for f in existing.get('files', [])]
+                new_hashes = [f.get('image_hash', '') for f in history_item['files']]
+                if all(existing_hashes) and all(new_hashes):
+                    if existing_hashes == new_hashes:
                         return
+                else:
+                    if (existing.get('file_count') == history_item['file_count']
+                            and existing.get('total_lines') == history_item['total_lines']):
+                        existing_files = [(f['name'], f['lines'], f.get('content', [])) for f in existing.get('files', [])]
+                        new_files      = [(f['name'], f['lines'], f.get('content', [])) for f in history_item['files']]
+                        if existing_files == new_files:
+                            return
 
             # 添加到历史记录列表开头
             self.history_data.insert(0, history_item)
-
-            # 同步更新文件名索引
-            new_key = frozenset(f.get('name', '') for f in history_item['files'])
-            self._history_names_set.add(new_key)
 
             # 限制历史记录数量
             if len(self.history_data) > self.history_limit:
                 removed = self.history_data[self.history_limit:]
                 self.history_data = self.history_data[:self.history_limit]
-                for item in removed:
-                    self._history_names_set.discard(
-                        frozenset(f.get('name', '') for f in item.get('files', [])))
 
             # 保存到文件
             self.save_history()
@@ -11875,6 +11976,8 @@ class OCRApp:
 
     def _run_ocr_by_mode(self, mode, delay=500):
         """根据模式字符串调度识别"""
+        self._capture_history_book_page()
+        self._increment_book_page_for_import(1)
         if mode == 'basic':
             self.root.after(delay, self.perform_quick_ocr)
         elif mode == 'general':
@@ -12817,7 +12920,8 @@ class OCRApp:
 
                         import tempfile
                         temp_dir = tempfile.gettempdir()
-                        temp_path = os.path.join(temp_dir, "cropped_merged_ocr.jpg")
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        temp_path = os.path.join(temp_dir, f"cropped_merged_ocr_{timestamp}.jpg")
                         merged.save(temp_path, format='JPEG', quality=90)
 
                         if user_choice == 'save':

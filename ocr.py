@@ -9,7 +9,7 @@ from urllib.parse import quote_plus
 from PIL import Image
 import threading
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import re
 import random
@@ -830,18 +830,20 @@ class OCRApp:
                   font=('Microsoft YaHei', 9), padx=10, pady=4,
                   cursor='hand2').pack(side=tk.RIGHT, padx=(0, 6))
 
-        # 三个子标签
+        # 四个子标签
         nb = ttk.Notebook(page)
         nb.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
 
         tab_total   = tk.Frame(nb, bg='white')
         tab_daily   = tk.Frame(nb, bg='white')
         tab_monthly = tk.Frame(nb, bg='white')
+        tab_chart   = tk.Frame(nb, bg='white')
         nb.add(tab_total,   text=' 📈 总计 ')
         nb.add(tab_daily,   text=' 📅 按日 ')
         nb.add(tab_monthly, text=' 📊 按月 ')
+        nb.add(tab_chart,   text=' 📉 折线图 ')
 
-        self._stats_tabs = (tab_total, tab_daily, tab_monthly)
+        self._stats_tabs = (tab_total, tab_daily, tab_monthly, tab_chart)
 
         def _reload():
             for tab in self._stats_tabs:
@@ -851,6 +853,7 @@ class OCRApp:
             self._render_total_stats(tab_total)
             self._render_daily_stats(tab_daily)
             self._render_monthly_stats(tab_monthly)
+            self._render_stats_call_chart(tab_chart)
 
         def _clear_stats():
             pwd = simpledialog.askstring('清空统计', '请输入密码', show='*', parent=page)
@@ -1394,6 +1397,341 @@ class OCRApp:
                 b.config(bg='white', fg='#374151', highlightthickness=1,
                          highlightbackground='#E5E7EB')
         _fill()
+
+
+    def _render_stats_call_chart(self, parent):
+        """按天展示高精度/通用的分钟级接口成功和缓存复用次数。"""
+        BG = 'white'
+        parent.configure(bg=BG)
+
+        sorted_dates = sorted(self.stats.keys())
+        if not sorted_dates:
+            empty = tk.Frame(parent, bg=BG)
+            empty.pack(fill=tk.BOTH, expand=True)
+            tk.Label(empty, text='暂无统计数据', bg=BG, fg='#9CA3AF',
+                     font=('Microsoft YaHei', 12)).pack(expand=True)
+            return
+
+        def _build_minute_rows(date):
+            day_data = self.stats.get(date, {})
+            minute_map = {}
+            try:
+                start_dt = datetime.strptime(date, '%Y-%m-%d')
+                minute_keys = [
+                    (start_dt + timedelta(minutes=i)).strftime('%Y-%m-%d %H:%M')
+                    for i in range(24 * 60)
+                ]
+            except Exception:
+                minute_keys = []
+
+            for minute in minute_keys:
+                minute_map[minute] = {
+                    'accurate_api': 0, 'accurate_cache': 0,
+                    'general_api': 0, 'general_cache': 0
+                }
+
+            for record in day_data.get('minute_records', []):
+                if record.get('type') not in ('accurate', 'general'):
+                    continue
+                minute = str(record.get('time', ''))[:16]
+                if not minute:
+                    continue
+                row = minute_map.setdefault(minute, {
+                    'accurate_api': 0, 'accurate_cache': 0,
+                    'general_api': 0, 'general_cache': 0
+                })
+                prefix = 'accurate' if record.get('type') == 'accurate' else 'general'
+                row[f'{prefix}_api'] += int(record.get('api_success', 0) or 0)
+                row[f'{prefix}_cache'] += int(record.get('cached', 0) or 0)
+
+            if not day_data.get('minute_records'):
+                # 旧统计没有分钟明细，只能把当天汇总放在 00:00 作为兼容显示。
+                minute = f'{date} 00:00'
+                acc = day_data.get('accurate', {})
+                gen = day_data.get('general', {})
+                row = minute_map.setdefault(minute, {
+                    'accurate_api': 0, 'accurate_cache': 0,
+                    'general_api': 0, 'general_cache': 0
+                })
+                row['accurate_api'] = int(acc.get('success', 0) or 0)
+                row['accurate_cache'] = int(acc.get('cached', 0) or 0)
+                row['general_api'] = int(gen.get('success', 0) or 0)
+                row['general_cache'] = int(gen.get('cached', 0) or 0)
+
+            rows = []
+            for minute in sorted(minute_map.keys()):
+                values = minute_map[minute]
+                rows.append({
+                    'minute': minute,
+                    'label': minute[11:16] if len(minute) >= 16 else minute,
+                    **values
+                })
+            return rows
+
+        header = tk.Frame(parent, bg=BG)
+        header.pack(fill=tk.X, padx=18, pady=(10, 0))
+        tk.Label(header, text='每天高精度 / 通用调用次数趋势', bg=BG, fg='#111827',
+                 font=('Microsoft YaHei', 11, 'bold')).pack(side=tk.LEFT)
+
+        control = tk.Frame(header, bg=BG)
+        control.pack(side=tk.RIGHT)
+        tk.Label(control, text='日期：', bg=BG, fg='#374151',
+                 font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
+        selected_date = tk.StringVar(value=sorted_dates[-1])
+        date_box = ttk.Combobox(control, textvariable=selected_date,
+                                values=list(reversed(sorted_dates)),
+                                state='readonly', width=12,
+                                font=('Microsoft YaHei', 9))
+        date_box.pack(side=tk.LEFT)
+        tk.Label(control, text='  范围：', bg=BG, fg='#374151',
+                 font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
+        range_options = ['全天', '最近有调用的小时']
+        selected_range = tk.StringVar(value='全天')
+        range_box = ttk.Combobox(control, textvariable=selected_range,
+                                 values=range_options, state='readonly',
+                                 width=16, font=('Microsoft YaHei', 9))
+        range_box.pack(side=tk.LEFT)
+        tk.Button(control, text='上一小时', command=lambda: _shift_hour(-1),
+                  bg='#E5E7EB', fg='#374151', relief='flat',
+                  font=('Microsoft YaHei', 8), padx=8, pady=2,
+                  cursor='hand2').pack(side=tk.LEFT, padx=(6, 2))
+        tk.Button(control, text='下一小时', command=lambda: _shift_hour(1),
+                  bg='#E5E7EB', fg='#374151', relief='flat',
+                  font=('Microsoft YaHei', 8), padx=8, pady=2,
+                  cursor='hand2').pack(side=tk.LEFT, padx=(2, 0))
+
+        try:
+            ensure_matplotlib_loaded()
+        except Exception as e:
+            tk.Label(parent, text=f'图表加载失败：{e}', bg=BG, fg='#EF4444',
+                     font=('Microsoft YaHei', 10)).pack(expand=True)
+            return
+
+        chart_frame = tk.Frame(parent, bg=BG)
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
+
+        fig, ax = plt.subplots(figsize=(9, 4.8), dpi=100)
+        fig.patch.set_facecolor(BG)
+        canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        summary_lbl = tk.Label(parent, text='', bg=BG, fg='#6B7280',
+                               font=('Microsoft YaHei', 9))
+        summary_lbl.pack(fill=tk.X, padx=18, pady=(0, 2))
+        detail_lbl = tk.Label(parent, text='点击图上的时间点查看该分钟明细',
+                              bg=BG, fg='#374151', font=('Microsoft YaHei', 9),
+                              anchor='w')
+        detail_lbl.pack(fill=tk.X, padx=18, pady=(0, 8))
+
+        chart_state = {'full_rows': [], 'display_start': 0, 'display_rows': [], 'current_hour': None}
+
+        def _show_minute_detail(minute_index):
+            rows = chart_state.get('full_rows') or []
+            if not rows:
+                return
+            minute_index = max(0, min(len(rows) - 1, minute_index))
+            row = rows[minute_index]
+            parts = []
+            detail_items = [
+                ('高精度接口成功', row['accurate_api']),
+                ('高精度缓存复用', row['accurate_cache']),
+                ('通用接口成功', row['general_api']),
+                ('通用缓存复用', row['general_cache']),
+            ]
+            for label, value in detail_items:
+                if value:
+                    parts.append(f'{label} {value} 次')
+            detail = ' / '.join(parts) if parts else '无调用'
+            detail_lbl.config(text=f"{row['minute']}  {detail}")
+
+        def _show_hour_detail(hour):
+            rows = chart_state.get('full_rows') or []
+            if not rows:
+                return
+            hour = max(0, min(23, int(hour)))
+            chunk = rows[hour * 60:(hour + 1) * 60]
+            totals = {
+                '高精度接口成功': sum(r['accurate_api'] for r in chunk),
+                '高精度缓存复用': sum(r['accurate_cache'] for r in chunk),
+                '通用接口成功': sum(r['general_api'] for r in chunk),
+                '通用缓存复用': sum(r['general_cache'] for r in chunk),
+            }
+            parts = [f'{label} {value} 次' for label, value in totals.items() if value]
+            detail = ' / '.join(parts) if parts else '无调用'
+            detail_lbl.config(text=f"{selected_date.get()} {hour:02d}:00-{hour:02d}:59  {detail}")
+
+        def _row_has_call(row):
+            return row['accurate_api'] or row['accurate_cache'] or row['general_api'] or row['general_cache']
+
+        def _latest_active_hour(rows):
+            for i in range(len(rows) - 1, -1, -1):
+                if _row_has_call(rows[i]):
+                    return i // 60
+            return None
+
+        def _build_hour_rows(rows):
+            hour_rows = []
+            for hour in range(24):
+                chunk = rows[hour * 60:(hour + 1) * 60]
+                hour_rows.append({
+                    'hour': hour,
+                    'label': f'{hour:02d}:00',
+                    'accurate_api': sum(r['accurate_api'] for r in chunk),
+                    'accurate_cache': sum(r['accurate_cache'] for r in chunk),
+                    'general_api': sum(r['general_api'] for r in chunk),
+                    'general_cache': sum(r['general_cache'] for r in chunk),
+                })
+            return hour_rows
+
+        def _set_hour(hour):
+            chart_state['current_hour'] = max(0, min(23, int(hour)))
+            selected_range.set('最近有调用的小时')
+            _draw_chart()
+
+        def _shift_hour(delta):
+            hour = chart_state.get('current_hour')
+            if hour is None:
+                rows = chart_state.get('full_rows') or _build_minute_rows(selected_date.get())
+                hour = _latest_active_hour(rows)
+            if hour is None:
+                hour = 0
+            _set_hour(hour + delta)
+
+        def _current_range_start(full_rows):
+            if selected_range.get() == '全天':
+                return 0, 24 * 60
+            if selected_range.get() == '最近有调用的小时':
+                hour = chart_state.get('current_hour')
+                if hour is None:
+                    hour = _latest_active_hour(full_rows)
+                    if hour is None:
+                        hour = 0
+                    chart_state['current_hour'] = hour
+                return hour * 60, hour * 60 + 60
+            return 0, 24 * 60
+
+        def _draw_chart(event=None):
+            full_rows = _build_minute_rows(selected_date.get())
+            start_i, end_i = _current_range_start(full_rows)
+            is_all_day = selected_range.get() == '全天'
+            rows = _build_hour_rows(full_rows) if is_all_day else full_rows[start_i:end_i]
+            chart_state['full_rows'] = full_rows
+            chart_state['display_start'] = start_i
+            chart_state['display_rows'] = rows
+            view_acc_api = [r['accurate_api'] for r in rows]
+            view_acc_cache = [r['accurate_cache'] for r in rows]
+            view_gen_api = [r['general_api'] for r in rows]
+            view_gen_cache = [r['general_cache'] for r in rows]
+
+            ax.clear()
+            ax.set_facecolor('#FFFFFF')
+            series = [
+                ('accurate_api', 3.0, -0.24, '#0F5CC0', 'o', '高精度-接口成功'),
+                ('accurate_cache', 2.0, -0.08, '#38BDF8', 's', '高精度-缓存复用'),
+                ('general_api', 1.0, 0.08, '#7C3AED', '^', '通用-接口成功'),
+                ('general_cache', 0.0, 0.24, '#F97316', 'D', '通用-缓存复用'),
+            ]
+            for key, y_pos, x_offset, color, marker, label in series:
+                xs = []
+                ys = []
+                sizes = []
+                point_labels = []
+                for i, row in enumerate(rows):
+                    value = row[key]
+                    if value > 0:
+                        xs.append(i + x_offset)
+                        ys.append(y_pos)
+                        sizes.append(46 + min(value, 10) * 7 if is_all_day else 36 + min(value, 8) * 8)
+                        point_labels.append(str(value) if is_all_day else row['label'])
+                ax.scatter(xs, ys, s=sizes, color=color, marker=marker,
+                           alpha=0.92, edgecolors='#111827', linewidths=0.8,
+                           label=label)
+                for x_pos, y_pos2, text in zip(xs, ys, point_labels):
+                    ax.text(x_pos + 0.06, y_pos2 + 0.16, text,
+                            color='#111827', fontsize=8, fontweight='bold' if is_all_day else 'normal',
+                            ha='left', va='bottom')
+
+            ax.set_xlabel('时间（按小时聚合）' if is_all_day else '时间（精确到分钟）', fontsize=10)
+            ax.set_ylabel('')
+            ax.set_yticks([])
+            ax.grid(True, axis='x', linestyle='--', linewidth=0.7, alpha=0.22)
+            ax.spines['left'].set_visible(False)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['bottom'].set_color('#CBD5E1')
+            ax.legend(loc='upper left', frameon=False, ncol=4,
+                      scatterpoints=1, markerscale=1.25)
+
+            if is_all_day:
+                tick_positions = list(range(24))
+                tick_labels = [f'{i:02d}:00' for i in tick_positions]
+                ax.set_xlim(-0.9, 23.9)
+            else:
+                tick_positions = list(range(0, 60, 5)) + [59]
+                base_hour = start_i // 60
+                tick_labels = [f'{base_hour:02d}:{i:02d}' for i in tick_positions]
+                ax.set_xlim(-1.5, 60.5)
+            ax.set_xticks(tick_positions)
+            ax.set_xticklabels(tick_labels, rotation=35, ha='right')
+            ax.set_ylim(-0.7, 3.7)
+            fig.tight_layout()
+            canvas.draw()
+
+            active_count = sum(1 for row in rows if _row_has_call(row))
+            range_text = selected_range.get()
+            if range_text == '全天':
+                range_label = '全天'
+                active_label = f'有调用记录 {active_count} 个小时'
+            else:
+                hour = start_i // 60
+                range_label = f'{hour:02d}:00-{hour:02d}:59 当前小时'
+                active_label = f'有调用记录 {active_count} 分钟'
+            summary_lbl.config(
+                text=(f"{selected_date.get()}  "
+                      f"{range_label}{active_label}    "
+                      f"高精度接口成功 {sum(view_acc_api)} 次 / 缓存复用 {sum(view_acc_cache)} 次    "
+                      f"通用接口成功 {sum(view_gen_api)} 次 / 缓存复用 {sum(view_gen_cache)} 次")
+            )
+            detail_lbl.config(text='点击小时点进入该小时明细' if is_all_day else '点击图上的时间点查看该分钟明细')
+
+        def _on_chart_click(event):
+            if event.inaxes != ax or event.xdata is None:
+                return
+            start_i = chart_state.get('display_start', 0)
+            minute_index = start_i + int(round(event.xdata))
+            if selected_range.get() == '全天':
+                hour = int(round(event.xdata))
+                if 0 <= hour < 24:
+                    minute_index = hour * 60
+                    chart_state['current_hour'] = hour
+                    selected_range.set('最近有调用的小时')
+                    _draw_chart()
+                    _show_hour_detail(hour)
+                    return
+            _show_minute_detail(minute_index)
+
+        def _on_date_changed(event=None):
+            chart_state['current_hour'] = None
+            _draw_chart()
+
+        def _on_range_changed(event=None):
+            if selected_range.get() == '最近有调用的小时':
+                chart_state['current_hour'] = None
+            _draw_chart()
+
+        fig.canvas.mpl_connect('button_press_event', _on_chart_click)
+        date_box.bind('<<ComboboxSelected>>', _on_date_changed)
+        range_box.bind('<<ComboboxSelected>>', _on_range_changed)
+        _draw_chart()
+
+        def _close_chart(event=None):
+            if event is None or event.widget is chart_frame:
+                try:
+                    plt.close(fig)
+                except Exception:
+                    pass
+
+        chart_frame.bind('<Destroy>', _close_chart, add='+')
 
 
     def _render_stats_inline(self, parent):
@@ -8073,12 +8411,11 @@ class OCRApp:
         btn_frame = tk.Frame(page, bg='white')
         btn_frame.pack(fill=tk.X, padx=24, pady=(4, 16))
 
-        user_choice = [None]
         selected_merged = [merged_image]
         callback_store = [None]
 
         def set_cb(cb):
-            callback_store[0] = cb
+            callback_store[0] = cb  # no-op：保留兼容，实际不再回调
 
         def update_preview():
             merged, _, _ = self._merge_images_horizontally(images, reverse_order[0])
@@ -8112,11 +8449,20 @@ class OCRApp:
             update_preview()
 
         def choose(choice):
-            user_choice[0] = choice
-            cb = callback_store[0]
-            if cb:
-                cb(choice, selected_merged[0], total_width, max_height, selected_mode[0])
-            # 跳回时同步侧边栏模式
+            if choice == 'save':
+                # 保存拼接图片并导入到软件
+                if self.merge_save_path:
+                    filename = self._make_image_filename('拼接图片', '.png')
+                    save_path = os.path.join(self.merge_save_path, filename)
+                else:
+                    import tempfile
+                    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                    tmp.close()
+                    save_path = tmp.name
+                selected_merged[0].save(save_path)
+                if self.merge_save_path:
+                    self.show_toast(f'✓ 拼接图片已保存：{filename}')
+                self.select_file_internal(save_path)
             self._sync_ocr_sidebar_mode(selected_mode[0])
             self._nav_to('OCR识别')
 
@@ -8129,7 +8475,7 @@ class OCRApp:
                                bg='#FF9800', fg='white', font=('Microsoft YaHei', 10),
                                padx=18, pady=8)
         switch_btn.pack(side=tk.LEFT, padx=6)
-        tk.Button(btn_frame, text='💾 保存并识别', command=lambda: choose('save'),
+        tk.Button(btn_frame, text='📥 导入识别', command=lambda: choose('save'),
                   bg='#4CAF50', fg='white', font=('Microsoft YaHei', 10),
                   padx=18, pady=8).pack(side=tk.LEFT, padx=6)
         tk.Button(btn_frame, text='取消', command=lambda: choose('cancel'),
@@ -8213,6 +8559,11 @@ class OCRApp:
         source_type = entry['type']
         data = entry['data']
         try:
+            if source_type == 'screenshot':
+                # 截图历史直接重建截图预览页，不走拼接预览
+                self._reopen_screenshot_preview(data)
+                return
+
             if source_type == 'file':
                 images = [Image.open(p) for p in data]
                 item_label, item_action, preview_type = '图片数量', '选择', 'merge'
@@ -8971,106 +9322,6 @@ class OCRApp:
             self.root.after(0, lambda: self.progress_label.config(text="✗ 处理失败"))
             self.root.after(0, self._update_ocr_btn_by_keys)
             self.root.after(0, lambda: self.select_btn.config(state=tk.NORMAL))
-
-    
-
-    
-
-    def _perform_screenshot_ocr(self):
-        """截图专用OCR识别，跳过尺寸限制直接调用通用识别接口"""
-        if not self.image_paths:
-            messagebox.showwarning("警告", "请先选择图片文件！")
-            return
-
-        if not API_KEY_GENERAL or not SECRET_KEY_GENERAL:
-            messagebox.showerror("错误", "请先在 .env 文件中配置 API_KEY_GENERAL 和 SECRET_KEY_GENERAL！")
-            return
-
-        self.ocr_btn.config(state=tk.DISABLED)
-        self.quick_ocr_btn.config(state=tk.DISABLED)
-        self.general_ocr_btn.config(state=tk.DISABLED)
-        self.select_btn.config(state=tk.DISABLED)
-        self._set_status('running')
-
-        def _thread():
-            try:
-                image_path = self.image_paths[0]
-                self.root.after(0, lambda: self.result_text.delete(1.0, tk.END))
-                self.root.after(0, lambda: self.progress_label.config(text="⏳ 通用识别中...", fg='#F59E0B'))
-                self.all_results = []
-
-                image_hash, cached_result = self.get_cached_ocr_result(image_path, 'general')
-                if cached_result:
-                    self.append_cached_ocr_result(image_path, cached_result)
-                else:
-                    result = ocr_image_general(image_path)
-                    if "words_result" in result:
-                        formatted_lines = []
-                        for item in result["words_result"]:
-                            words = item["words"]
-                            location = item.get("location", {})
-                            top = location.get("top", 0)
-                            left = location.get("left", 0)
-                            height_val = location.get("height", 0)
-                            prob = item.get('probability', {})
-                            confidence = int(prob.get('average', 0) * 100) if isinstance(prob, dict) else 0
-                            formatted_lines.append(f"{words}|{top}|{left}|{height_val}|{confidence}")
-                        recognized_text = "\n".join(formatted_lines)
-                        self.root.after(0, lambda t=recognized_text: self.result_text.insert(tk.END, t + "\n"))
-                        self.all_results.append({
-                            'file': os.path.basename(image_path),
-                            'path': image_path,
-                            'lines': formatted_lines,
-                            'count': len(formatted_lines),
-                            'image_hash': image_hash
-                        })
-                        self.save_ocr_cache(image_hash, 'general', image_path, formatted_lines)
-                        self.root.after(0, lambda c=len(formatted_lines):
-                            self.result_text.insert(tk.END, f"\n  🔌 接口识别成功：{c} 行文字\n"))
-                    else:
-                        self.root.after(0, lambda r=result:
-                            self.result_text.insert(tk.END, f"✗ 识别失败：{r}\n"))
-                        self.all_results.append({
-                            'file': os.path.basename(image_path),
-                            'path': image_path,
-                            'lines': [],
-                            'count': 0,
-                            'error': str(result)
-                        })
-
-                self.root.after(0, lambda: self.result_text.see(tk.END))
-                self.root.after(0, lambda: self.export_btn.config(state=tk.NORMAL))
-                self.root.after(0, lambda: self.copy_btn.config(state=tk.NORMAL))
-                self.root.after(0, lambda: self.add_zeros_btn.config(state=tk.NORMAL))
-                self.root.after(0, self._update_ocr_btn_by_keys)
-                self.root.after(0, lambda: self.select_btn.config(state=tk.NORMAL))
-                total_lines = sum(r['count'] for r in self.all_results)
-
-                # 记录统计
-                cached_count = sum(1 for r in self.all_results if r.get('cached') and r.get('count', 0) > 0)
-                cached_lines = sum(r['count'] for r in self.all_results if r.get('cached'))
-                success_count = sum(1 for r in self.all_results if r['count'] > 0)
-                api_success_count = success_count - cached_count
-                failed_count = sum(1 for r in self.all_results if r.get('error') and not r.get('skipped', False))
-                api_lines = total_lines - cached_lines
-                stats_success_count = success_count if self.stats_count_cache_as_success else api_success_count
-                if success_count > 0 or failed_count > 0:
-                    self.record_ocr('general', stats_success_count, failed_count, total_lines,
-                                    cached_count=cached_count, cached_lines=cached_lines,
-                                    api_lines=api_lines, processed_count=1)
-
-                self.root.after(0, lambda: self.progress_label.config(
-                    text=f"✓ 截图识别完成！文字行数：{total_lines}"))
-                self.root.after(0, lambda: self._set_status('done'))
-            except Exception as e:
-                self.root.after(0, lambda err=e: self.result_text.insert(tk.END, f"\n发生错误：{err}\n"))
-                self.root.after(0, lambda err=e: messagebox.showerror("错误", _friendly_error_msg(err)))
-                self.root.after(0, lambda: self.progress_label.config(text="✗ 处理失败"))
-                self.root.after(0, self._update_ocr_btn_by_keys)
-                self.root.after(0, lambda: self.select_btn.config(state=tk.NORMAL))
-
-        import threading
-        threading.Thread(target=_thread, daemon=True).start()
 
     def perform_general_ocr(self):
         """执行通用 OCR 识别"""
@@ -10937,6 +11188,7 @@ class OCRApp:
             self._ensure_ocr_stats_fields(day_data.setdefault('accurate', {}), include_skipped=True)
             self._ensure_ocr_stats_fields(day_data.setdefault('basic', {}))
             self._ensure_ocr_stats_fields(day_data.setdefault('general', {}))
+            day_data.setdefault('minute_records', [])
 
     def record_ocr(self, ocr_type, success_count, failed_count, lines,
                    cached_count=0, cached_lines=0, api_lines=None, processed_count=None):
@@ -10971,6 +11223,10 @@ class OCRApp:
             api_lines = lines - cached_lines
         if processed_count is None:
             processed_count = success_count + failed_count + cached_count
+
+        interface_success_count = success_count
+        if self.stats_count_cache_as_success:
+            interface_success_count = max(0, success_count - cached_count)
         
         self.stats[today][ocr_type]['count'] += 1
         self.stats[today][ocr_type]['processed'] += processed_count
@@ -10980,6 +11236,13 @@ class OCRApp:
         self.stats[today][ocr_type]['lines'] += lines
         self.stats[today][ocr_type]['api_lines'] += api_lines
         self.stats[today][ocr_type]['cached_lines'] += cached_lines
+
+        self.stats[today].setdefault('minute_records', []).append({
+            'time': datetime.now().strftime("%Y-%m-%d %H:%M"),
+            'type': ocr_type,
+            'api_success': interface_success_count,
+            'cached': cached_count
+        })
         
         self.save_stats()
 
@@ -11008,6 +11271,10 @@ class OCRApp:
         # 按月统计选项卡
         monthly_tab = tk.Frame(notebook)
         notebook.add(monthly_tab, text="📊 按月统计")
+
+        # 折线图选项卡
+        chart_tab = tk.Frame(notebook)
+        notebook.add(chart_tab, text="📉 折线图")
         
         # === 总计统计 ===
         self._show_total_stats(total_tab)
@@ -11017,6 +11284,9 @@ class OCRApp:
         
         # === 按月统计 ===
         self._show_monthly_stats(monthly_tab)
+
+        # === 折线图 ===
+        self._render_stats_call_chart(chart_tab)
         
         # 按钮
         btn_frame = tk.Frame(stats_window)
@@ -11989,7 +12259,7 @@ class OCRApp:
         if mode == 'basic':
             self.root.after(delay, self.perform_quick_ocr)
         elif mode == 'general':
-            self.root.after(delay, self._perform_screenshot_ocr)
+            self.root.after(delay, self.perform_general_ocr)
         else:
             self.root.after(delay, self.perform_ocr)
 
@@ -12090,6 +12360,189 @@ class OCRApp:
         except Exception as e:
             messagebox.showerror("错误", f"拼接失败：{str(e)}")
     
+    def _reopen_screenshot_preview(self, captured_shots):
+        """用已有的截图列表重建截图预览页"""
+        if not captured_shots:
+            messagebox.showwarning('提示', '截图数据已失效，无法重新预览')
+            return
+        try:
+            shots_rtl = list(reversed(captured_shots))
+            total_w = sum(s.width for s in shots_rtl)
+            max_h = max(s.height for s in shots_rtl)
+            merged = Image.new('RGB', (total_w, max_h), (255, 255, 255))
+            x_offset = 0
+            for shot in shots_rtl:
+                merged.paste(shot, (x_offset, 0))
+                x_offset += shot.width
+            warnings = []
+            acc_max_w = self.size_limits.get('accurate_max_width', 15000)
+            acc_max_h = self.size_limits.get('accurate_max_height', 15000)
+            bas_max_w = self.size_limits.get('basic_max_width', 8100)
+            bas_max_h = self.size_limits.get('basic_max_height', 3000)
+            w, h = merged.size
+            if w > acc_max_w or h > acc_max_h:
+                warnings.append(f'⚠️ 超出高精度最大尺寸 ({acc_max_w}x{acc_max_h})')
+            if w > bas_max_w or h > bas_max_h:
+                warnings.append(f'⚠️ 超出快速识别最大尺寸 ({bas_max_w}x{bas_max_h})')
+            self._build_screenshot_preview_page(merged, captured_shots, warnings, retake_fn=None)
+        except Exception as e:
+            messagebox.showerror('错误', f'重新打开截图预览失败：{e}')
+
+    def _build_screenshot_preview_page(self, merged, captured_shots, warnings=None, retake_fn=None):
+        """构建截图预览页"""
+        from PIL import ImageTk
+        w, h = merged.size
+        page = self._page_screenshot
+        for c in page.winfo_children():
+            c.destroy()
+
+        header = tk.Frame(page, bg='white')
+        header.pack(fill=tk.X, padx=24, pady=(18, 4))
+        tk.Label(header, text='📸 截图拼接预览', bg='white', fg='#111827',
+                 font=('Microsoft YaHei', 14, 'bold')).pack(side=tk.LEFT)
+
+        info_row = tk.Frame(page, bg='white')
+        info_row.pack(fill=tk.X, padx=24)
+        tk.Label(info_row,
+                 text=f'拼接结果：{w}×{h} px，共 {len(captured_shots)} 张截图（从右到左）',
+                 bg='white', fg='#6B7280', font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
+
+        if warnings:
+            warn_frame = tk.Frame(page, bg='#FFF3E0')
+            warn_frame.pack(fill=tk.X, padx=24, pady=(6, 0))
+            for msg in warnings:
+                tk.Label(warn_frame, text=msg, bg='#FFF3E0', fg='#E65100',
+                         font=('Microsoft YaHei', 9)).pack(anchor=tk.W, padx=8, pady=2)
+
+        canvas_frame = tk.Frame(page, bg='white')
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=24, pady=10)
+        canvas_p = tk.Canvas(canvas_frame, bg='#F9FAFB',
+                             highlightthickness=1, highlightbackground='#E5E7EB')
+        sb_h = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=canvas_p.xview)
+        sb_v = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas_p.yview)
+        canvas_p.configure(xscrollcommand=sb_h.set, yscrollcommand=sb_v.set)
+        sb_h.pack(side=tk.BOTTOM, fill=tk.X)
+        sb_v.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas_p.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._nav_to('截图预览')
+        page.update_idletasks()
+
+        area_w = canvas_p.winfo_width() or 800
+        area_h = canvas_p.winfo_height() or 400
+        scale = min(1.0, area_w / w, area_h / h)
+        disp_w, disp_h = int(w * scale), int(h * scale)
+        disp_img = merged.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
+        tk_img = ImageTk.PhotoImage(disp_img)
+        canvas_p.create_image(0, 0, anchor=tk.NW, image=tk_img)
+        canvas_p.image = tk_img
+        canvas_p.configure(scrollregion=(0, 0, disp_w, disp_h))
+
+        _zoom = [scale]
+
+        def _rescale(new_scale):
+            new_scale = max(0.05, min(new_scale, 5.0))
+            _zoom[0] = new_scale
+            nw = int(w * new_scale)
+            nh = int(h * new_scale)
+            resized = merged.resize((nw, nh), Image.Resampling.LANCZOS)
+            new_photo = ImageTk.PhotoImage(resized)
+            canvas_p.itemconfig(canvas_p.find_all()[0], image=new_photo)
+            canvas_p.image = new_photo
+            canvas_p.configure(scrollregion=(0, 0, nw, nh))
+
+        def _on_wheel(e):
+            factor = 1.15 if e.delta > 0 else (1 / 1.15)
+            _rescale(_zoom[0] * factor)
+        canvas_p.bind('<MouseWheel>', _on_wheel)
+
+        tk.Label(page, text='💡 滚轮缩放', bg='white', fg='#9CA3AF',
+                 font=('Microsoft YaHei', 8)).pack(pady=(0, 4))
+
+        mode_row = tk.Frame(page, bg='white')
+        mode_row.pack(pady=(0, 4))
+        tk.Label(mode_row, text='识别模式：', bg='white', fg='#374151',
+                 font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
+        shot_mode = [self.preview_ocr_defaults.get('screenshot',
+            self._selected_ocr_mode.get() if hasattr(self, '_selected_ocr_mode') else 'general')]
+        mode_btns_local = {}
+        for m, text in [('accurate', '高精度'), ('basic', '快速'), ('general', '通用')]:
+            key = self._has_ocr_key(m)
+            b = tk.Button(mode_row, text=text,
+                          bg='white', fg='#9CA3AF' if not key else '#374151',
+                          relief='flat', highlightthickness=1, highlightbackground='#E5E7EB',
+                          font=('Microsoft YaHei', 8), padx=8, pady=4,
+                          cursor='hand2' if key else 'arrow',
+                          state=tk.NORMAL if key else tk.DISABLED)
+            b.pack(side=tk.LEFT, padx=(0, 4))
+            mode_btns_local[m] = b
+        for m, b in mode_btns_local.items():
+            if m == shot_mode[0]:
+                b.config(bg='#1A6FD4', fg='white', highlightthickness=0)
+
+        def select_shot_mode(m):
+            if mode_btns_local[m]['state'] == tk.DISABLED:
+                return
+            shot_mode[0] = m
+            for mk, b in mode_btns_local.items():
+                b.config(bg='#1A6FD4' if mk == m else 'white',
+                         fg='white' if mk == m else '#374151',
+                         highlightthickness=0 if mk == m else 1)
+            self._sync_ocr_sidebar_mode(m)
+            self.preview_ocr_defaults['screenshot'] = m
+            self.store.set('preview_ocr_defaults', self.preview_ocr_defaults)
+
+        for m, b in mode_btns_local.items():
+            b.config(command=lambda mm=m: select_shot_mode(mm))
+
+        btn_frame = tk.Frame(page, bg='white')
+        btn_frame.pack(fill=tk.X, padx=24, pady=(4, 16))
+
+        def import_to_ocr():
+            """将拼接好的截图导入软件，等待用户手动选择模式和开始识别"""
+            if self.merge_save_path:
+                filename = self._make_image_filename('截图拼接', '.png')
+                save_path = os.path.join(self.merge_save_path, filename)
+            else:
+                import tempfile
+                tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                tmp.close()
+                save_path = tmp.name
+            merged.save(save_path)
+            if self.merge_save_path:
+                self.show_toast(f'✓ 截图已保存：{filename}')
+            self._sync_ocr_sidebar_mode(shot_mode[0])
+            self.select_file_internal(save_path)
+
+        def save_merged():
+            default_name = self._make_image_filename('截图拼接', '.png')
+            filepath = filedialog.asksaveasfilename(
+                title='保存截图拼接',
+                initialfile=default_name,
+                defaultextension='.png',
+                filetypes=[('PNG 图片', '*.png'), ('JPEG 图片', '*.jpg'), ('所有文件', '*.*')])
+            if not filepath:
+                return
+            try:
+                merged.save(filepath)
+                self.show_toast(f'✓ 截图已保存：{os.path.basename(filepath)}')
+            except Exception as e:
+                messagebox.showerror('保存失败', f'保存截图时出错：{e}')
+
+        tk.Button(btn_frame, text='📥 导入识别', command=import_to_ocr,
+                  bg='#1A6FD4', fg='white', font=('Microsoft YaHei', 10),
+                  padx=18, pady=8, cursor='hand2').pack(side=tk.LEFT, padx=4)
+        tk.Button(btn_frame, text='💾 保存图片', command=save_merged,
+                  bg='#4CAF50', fg='white', font=('Microsoft YaHei', 10),
+                  padx=18, pady=8, cursor='hand2').pack(side=tk.LEFT, padx=4)
+        if retake_fn:
+            tk.Button(btn_frame, text='🔄 重新截图', command=retake_fn,
+                      bg='#FF9800', fg='white', font=('Microsoft YaHei', 10),
+                      padx=18, pady=8, cursor='hand2').pack(side=tk.LEFT, padx=4)
+        tk.Button(btn_frame, text='取消', command=lambda: self._nav_to('OCR识别'),
+                  bg='#757575', fg='white', font=('Microsoft YaHei', 10),
+                  padx=18, pady=8, cursor='hand2').pack(side=tk.LEFT, padx=4)
+
     def start_screenshot_capture(self):
         """启动屏幕截图拼接功能：多次框选截图，从右到左拼接，Enter确认，预览后识别"""
         try:
@@ -12297,181 +12750,7 @@ class OCRApp:
             if w > bas_max_w or h > bas_max_h:
                 warnings.append(f'⚠️ 超出快速识别最大尺寸 ({bas_max_w}x{bas_max_h})')
 
-            page = self._page_screenshot
-            for c in page.winfo_children():
-                c.destroy()
-
-            from PIL import ImageTk
-
-            header = tk.Frame(page, bg='white')
-            header.pack(fill=tk.X, padx=24, pady=(18, 4))
-            tk.Label(header, text='📸 截图拼接预览', bg='white', fg='#111827',
-                     font=('Microsoft YaHei', 14, 'bold')).pack(side=tk.LEFT)
-
-            info_row = tk.Frame(page, bg='white')
-            info_row.pack(fill=tk.X, padx=24)
-            tk.Label(info_row,
-                     text=f'拼接结果：{w}×{h} px，共 {len(captured_shots)} 张截图（从右到左）',
-                     bg='white', fg='#6B7280', font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
-
-            if warnings:
-                warn_frame = tk.Frame(page, bg='#FFF3E0')
-                warn_frame.pack(fill=tk.X, padx=24, pady=(6, 0))
-                for msg in warnings:
-                    tk.Label(warn_frame, text=msg, bg='#FFF3E0', fg='#E65100',
-                             font=('Microsoft YaHei', 9)).pack(anchor=tk.W, padx=8, pady=2)
-
-            canvas_frame = tk.Frame(page, bg='white')
-            canvas_frame.pack(fill=tk.BOTH, expand=True, padx=24, pady=10)
-            canvas_p = tk.Canvas(canvas_frame, bg='#F9FAFB',
-                                 highlightthickness=1, highlightbackground='#E5E7EB')
-            sb_h = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=canvas_p.xview)
-            sb_v = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas_p.yview)
-            canvas_p.configure(xscrollcommand=sb_h.set, yscrollcommand=sb_v.set)
-            sb_h.pack(side=tk.BOTTOM, fill=tk.X)
-            sb_v.pack(side=tk.RIGHT, fill=tk.Y)
-            canvas_p.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-            # 先切到截图预览页，让页面可见后 Canvas 才有实际尺寸
-            self._nav_to('截图预览')
-            page.update_idletasks()
-
-            area_w = canvas_p.winfo_width() or 800
-            area_h = canvas_p.winfo_height() or 400
-            scale = min(1.0, area_w / w, area_h / h)
-            disp_w, disp_h = int(w * scale), int(h * scale)
-            disp_img = merged.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
-            tk_img = ImageTk.PhotoImage(disp_img)
-            canvas_p.create_image(0, 0, anchor=tk.NW, image=tk_img)
-            canvas_p.image = tk_img
-            canvas_p.configure(scrollregion=(0, 0, disp_w, disp_h))
-
-            _zoom = [scale]
-
-            def _rescale(new_scale):
-                new_scale = max(0.05, min(new_scale, 5.0))
-                _zoom[0] = new_scale
-                nw = int(w * new_scale)
-                nh = int(h * new_scale)
-                resized = merged.resize((nw, nh), Image.Resampling.LANCZOS)
-                new_photo = ImageTk.PhotoImage(resized)
-                canvas_p.itemconfig(canvas_p.find_all()[0], image=new_photo)
-                canvas_p.image = new_photo
-                canvas_p.configure(scrollregion=(0, 0, nw, nh))
-
-            def _on_wheel(e):
-                factor = 1.15 if e.delta > 0 else (1 / 1.15)
-                _rescale(_zoom[0] * factor)
-            canvas_p.bind('<MouseWheel>', _on_wheel)
-
-            zoom_label = tk.Label(page, text='💡 滚轮缩放', bg='white', fg='#9CA3AF',
-                                  font=('Microsoft YaHei', 8))
-            zoom_label.pack(pady=(0, 4))
-
-            # ── 识别模式选择（与侧边栏同步） ──
-            mode_row = tk.Frame(page, bg='white')
-            mode_row.pack(pady=(0, 4))
-            tk.Label(mode_row, text='识别模式：', bg='white', fg='#374151',
-                     font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
-            # 截图预览独立记忆模式
-            shot_mode = [self.preview_ocr_defaults.get('screenshot',
-                self._selected_ocr_mode.get() if hasattr(self, '_selected_ocr_mode') else 'general')]
-            mode_btns_local = {}
-            for m, text in [('accurate', '高精度'), ('basic', '快速'), ('general', '通用')]:
-                key = self._has_ocr_key(m)
-                b = tk.Button(mode_row, text=text,
-                              bg='white', fg='#9CA3AF' if not key else '#374151',
-                              relief='flat',
-                              highlightthickness=1, highlightbackground='#E5E7EB',
-                              font=('Microsoft YaHei', 8),
-                              padx=8, pady=4, cursor='hand2' if key else 'arrow',
-                              state=tk.NORMAL if key else tk.DISABLED)
-                b.pack(side=tk.LEFT, padx=(0, 4))
-                mode_btns_local[m] = b
-            for m, b in mode_btns_local.items():
-                if m == shot_mode[0]:
-                    b.config(bg='#1A6FD4', fg='white', highlightthickness=0)
-                else:
-                    b.config(bg='white', fg='#374151', highlightthickness=1,
-                             highlightbackground='#E5E7EB')
-
-            def select_shot_mode(m):
-                if mode_btns_local[m]['state'] == tk.DISABLED:
-                    return
-                shot_mode[0] = m
-                for mk, b in mode_btns_local.items():
-                    if mk == m:
-                        b.config(bg='#1A6FD4', fg='white', highlightthickness=0)
-                    else:
-                        b.config(bg='white', fg='#374151', highlightthickness=1,
-                                 highlightbackground='#E5E7EB')
-                # 同步到侧边栏，并记忆截图预览的模式
-                self._sync_ocr_sidebar_mode(m)
-                self.preview_ocr_defaults['screenshot'] = m
-                self.store.set('preview_ocr_defaults', self.preview_ocr_defaults)
-
-            for m, b in mode_btns_local.items():
-                b.config(command=lambda mm=m: select_shot_mode(mm))
-
-            btn_frame = tk.Frame(page, bg='white')
-            btn_frame.pack(fill=tk.X, padx=24, pady=(4, 16))
-
-            def confirm_ocr():
-                import tempfile
-                tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                tmp.close()
-                merged.save(tmp.name)
-                # 有预设保存目录时自动保存一份
-                if self.merge_save_path:
-                    try:
-                        filename = self._make_image_filename('截图拼接', '.png')
-                        save_path = os.path.join(self.merge_save_path, filename)
-                        merged.save(save_path)
-                        self.show_toast(f'✓ 已保存：{filename}')
-                    except Exception as e:
-                        print(f'截图自动保存失败: {e}')
-                self.image_paths = [tmp.name]
-                self.all_results = []
-                self.file_label.config(
-                    text=f'截图拼接：{w}×{h} px，{len(captured_shots)} 张',
-                    fg='#1E5A8A')
-                # 跳回时同步侧边栏模式
-                self._sync_ocr_sidebar_mode(shot_mode[0])
-                self._nav_to('OCR识别')
-                self._run_ocr_by_mode(shot_mode[0], delay=100)
-
-            def retake():
-                captured_shots.clear()
-                self._nav_to('OCR识别')
-                self.root.after(100, do_capture)
-
-            def cancel_preview():
-                self._nav_to('OCR识别')
-
-            def save_merged():
-                default_name = self._make_image_filename('截图拼接', '.png')
-                path = filedialog.asksaveasfilename(
-                    defaultextension='.png',
-                    filetypes=[('PNG 图片', '*.png'), ('JPEG 图片', '*.jpg'), ('所有文件', '*.*')],
-                    title='保存拼接图片',
-                    initialfile=default_name
-                )
-                if path:
-                    merged.save(path)
-                    messagebox.showinfo('保存成功', f'图片已保存：\n{path}')
-
-            tk.Button(btn_frame, text='✅ 确认识别', command=confirm_ocr,
-                      bg='#4CAF50', fg='white', font=('Microsoft YaHei', 10, 'bold'),
-                      padx=20, pady=6).pack(side=tk.LEFT, padx=5)
-            tk.Button(btn_frame, text='📁 保存截图片', command=lambda: save_merged(),
-                      bg='#1976D2', fg='white', font=('Microsoft YaHei', 10),
-                      padx=20, pady=6).pack(side=tk.LEFT, padx=5)
-            tk.Button(btn_frame, text='🔄 重新截图', command=retake,
-                      bg='#FF9800', fg='white', font=('Microsoft YaHei', 10),
-                      padx=20, pady=6).pack(side=tk.LEFT, padx=5)
-            tk.Button(btn_frame, text='取消', command=cancel_preview,
-                      bg='#757575', fg='white', font=('Microsoft YaHei', 10),
-                      padx=20, pady=6).pack(side=tk.LEFT, padx=5)
+            self._build_screenshot_preview_page(merged, captured_shots, warnings, retake_fn=do_capture)
 
         do_capture()
 

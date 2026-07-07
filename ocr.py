@@ -8411,11 +8411,12 @@ class OCRApp:
         btn_frame = tk.Frame(page, bg='white')
         btn_frame.pack(fill=tk.X, padx=24, pady=(4, 16))
 
+        user_choice = [None]
         selected_merged = [merged_image]
         callback_store = [None]
 
         def set_cb(cb):
-            callback_store[0] = cb  # no-op：保留兼容，实际不再回调
+            callback_store[0] = cb
 
         def update_preview():
             merged, _, _ = self._merge_images_horizontally(images, reverse_order[0])
@@ -8449,20 +8450,11 @@ class OCRApp:
             update_preview()
 
         def choose(choice):
-            if choice == 'save':
-                # 保存拼接图片并导入到软件
-                if self.merge_save_path:
-                    filename = self._make_image_filename('拼接图片', '.png')
-                    save_path = os.path.join(self.merge_save_path, filename)
-                else:
-                    import tempfile
-                    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                    tmp.close()
-                    save_path = tmp.name
-                selected_merged[0].save(save_path)
-                if self.merge_save_path:
-                    self.show_toast(f'✓ 拼接图片已保存：{filename}')
-                self.select_file_internal(save_path)
+            user_choice[0] = choice
+            cb = callback_store[0]
+            if cb:
+                cb(choice, selected_merged[0], total_width, max_height, selected_mode[0])
+            # 跳回时同步侧边栏模式
             self._sync_ocr_sidebar_mode(selected_mode[0])
             self._nav_to('OCR识别')
 
@@ -8475,7 +8467,7 @@ class OCRApp:
                                bg='#FF9800', fg='white', font=('Microsoft YaHei', 10),
                                padx=18, pady=8)
         switch_btn.pack(side=tk.LEFT, padx=6)
-        tk.Button(btn_frame, text='📥 导入识别', command=lambda: choose('save'),
+        tk.Button(btn_frame, text='💾 保存并识别', command=lambda: choose('save'),
                   bg='#4CAF50', fg='white', font=('Microsoft YaHei', 10),
                   padx=18, pady=8).pack(side=tk.LEFT, padx=6)
         tk.Button(btn_frame, text='取消', command=lambda: choose('cancel'),
@@ -9322,6 +9314,106 @@ class OCRApp:
             self.root.after(0, lambda: self.progress_label.config(text="✗ 处理失败"))
             self.root.after(0, self._update_ocr_btn_by_keys)
             self.root.after(0, lambda: self.select_btn.config(state=tk.NORMAL))
+
+    
+
+    
+
+    def _perform_screenshot_ocr(self):
+        """截图专用OCR识别，跳过尺寸限制直接调用通用识别接口"""
+        if not self.image_paths:
+            messagebox.showwarning("警告", "请先选择图片文件！")
+            return
+
+        if not API_KEY_GENERAL or not SECRET_KEY_GENERAL:
+            messagebox.showerror("错误", "请先在 .env 文件中配置 API_KEY_GENERAL 和 SECRET_KEY_GENERAL！")
+            return
+
+        self.ocr_btn.config(state=tk.DISABLED)
+        self.quick_ocr_btn.config(state=tk.DISABLED)
+        self.general_ocr_btn.config(state=tk.DISABLED)
+        self.select_btn.config(state=tk.DISABLED)
+        self._set_status('running')
+
+        def _thread():
+            try:
+                image_path = self.image_paths[0]
+                self.root.after(0, lambda: self.result_text.delete(1.0, tk.END))
+                self.root.after(0, lambda: self.progress_label.config(text="⏳ 通用识别中...", fg='#F59E0B'))
+                self.all_results = []
+
+                image_hash, cached_result = self.get_cached_ocr_result(image_path, 'general')
+                if cached_result:
+                    self.append_cached_ocr_result(image_path, cached_result)
+                else:
+                    result = ocr_image_general(image_path)
+                    if "words_result" in result:
+                        formatted_lines = []
+                        for item in result["words_result"]:
+                            words = item["words"]
+                            location = item.get("location", {})
+                            top = location.get("top", 0)
+                            left = location.get("left", 0)
+                            height_val = location.get("height", 0)
+                            prob = item.get('probability', {})
+                            confidence = int(prob.get('average', 0) * 100) if isinstance(prob, dict) else 0
+                            formatted_lines.append(f"{words}|{top}|{left}|{height_val}|{confidence}")
+                        recognized_text = "\n".join(formatted_lines)
+                        self.root.after(0, lambda t=recognized_text: self.result_text.insert(tk.END, t + "\n"))
+                        self.all_results.append({
+                            'file': os.path.basename(image_path),
+                            'path': image_path,
+                            'lines': formatted_lines,
+                            'count': len(formatted_lines),
+                            'image_hash': image_hash
+                        })
+                        self.save_ocr_cache(image_hash, 'general', image_path, formatted_lines)
+                        self.root.after(0, lambda c=len(formatted_lines):
+                            self.result_text.insert(tk.END, f"\n  🔌 接口识别成功：{c} 行文字\n"))
+                    else:
+                        self.root.after(0, lambda r=result:
+                            self.result_text.insert(tk.END, f"✗ 识别失败：{r}\n"))
+                        self.all_results.append({
+                            'file': os.path.basename(image_path),
+                            'path': image_path,
+                            'lines': [],
+                            'count': 0,
+                            'error': str(result)
+                        })
+
+                self.root.after(0, lambda: self.result_text.see(tk.END))
+                self.root.after(0, lambda: self.export_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.copy_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.add_zeros_btn.config(state=tk.NORMAL))
+                self.root.after(0, self._update_ocr_btn_by_keys)
+                self.root.after(0, lambda: self.select_btn.config(state=tk.NORMAL))
+                total_lines = sum(r['count'] for r in self.all_results)
+
+                # 记录统计
+                cached_count = sum(1 for r in self.all_results if r.get('cached') and r.get('count', 0) > 0)
+                cached_lines = sum(r['count'] for r in self.all_results if r.get('cached'))
+                success_count = sum(1 for r in self.all_results if r['count'] > 0)
+                api_success_count = success_count - cached_count
+                failed_count = sum(1 for r in self.all_results if r.get('error') and not r.get('skipped', False))
+                api_lines = total_lines - cached_lines
+                stats_success_count = success_count if self.stats_count_cache_as_success else api_success_count
+                if success_count > 0 or failed_count > 0:
+                    self.record_ocr('general', stats_success_count, failed_count, total_lines,
+                                    cached_count=cached_count, cached_lines=cached_lines,
+                                    api_lines=api_lines, processed_count=1)
+
+                self.root.after(0, lambda: self.progress_label.config(
+                    text=f"✓ 截图识别完成！文字行数：{total_lines}"))
+                self.root.after(0, lambda: self._set_status('done'))
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.result_text.insert(tk.END, f"\n发生错误：{err}\n"))
+                self.root.after(0, lambda err=e: messagebox.showerror("错误", _friendly_error_msg(err)))
+                self.root.after(0, lambda: self.progress_label.config(text="✗ 处理失败"))
+                self.root.after(0, self._update_ocr_btn_by_keys)
+                self.root.after(0, lambda: self.select_btn.config(state=tk.NORMAL))
+
+        import threading
+        threading.Thread(target=_thread, daemon=True).start()
 
     def perform_general_ocr(self):
         """执行通用 OCR 识别"""
@@ -12259,7 +12351,7 @@ class OCRApp:
         if mode == 'basic':
             self.root.after(delay, self.perform_quick_ocr)
         elif mode == 'general':
-            self.root.after(delay, self.perform_general_ocr)
+            self.root.after(delay, self._perform_screenshot_ocr)
         else:
             self.root.after(delay, self.perform_ocr)
 
@@ -12498,50 +12590,36 @@ class OCRApp:
         btn_frame = tk.Frame(page, bg='white')
         btn_frame.pack(fill=tk.X, padx=24, pady=(4, 16))
 
-        def import_to_ocr():
-            """将拼接好的截图导入软件，等待用户手动选择模式和开始识别"""
+        def confirm_ocr():
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            tmp.close()
+            merged.save(tmp.name)
             if self.merge_save_path:
-                filename = self._make_image_filename('截图拼接', '.png')
-                save_path = os.path.join(self.merge_save_path, filename)
-            else:
-                import tempfile
-                tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                tmp.close()
-                save_path = tmp.name
-            merged.save(save_path)
-            if self.merge_save_path:
-                self.show_toast(f'✓ 截图已保存：{filename}')
+                try:
+                    filename = self._make_image_filename('截图拼接', '.png')
+                    save_path = os.path.join(self.merge_save_path, filename)
+                    merged.save(save_path)
+                    self.show_toast(f'✓ 已保存：{filename}')
+                except Exception as e:
+                    print(f'截图自动保存失败: {e}')
+            self.image_paths = [tmp.name]
+            self.all_results = []
+            self.file_label.config(
+                text=f'截图拼接：{w}×{h} px，{len(captured_shots)} 张', fg='#1E5A8A')
             self._sync_ocr_sidebar_mode(shot_mode[0])
-            self.select_file_internal(save_path)
+            self._nav_to('OCR识别')
+            self._run_ocr_by_mode(shot_mode[0], delay=100)
 
         def save_merged():
             default_name = self._make_image_filename('截图拼接', '.png')
-            filepath = filedialog.asksaveasfilename(
-                title='保存截图拼接',
-                initialfile=default_name,
+            path = filedialog.asksaveasfilename(
                 defaultextension='.png',
-                filetypes=[('PNG 图片', '*.png'), ('JPEG 图片', '*.jpg'), ('所有文件', '*.*')])
-            if not filepath:
-                return
-            try:
-                merged.save(filepath)
-                self.show_toast(f'✓ 截图已保存：{os.path.basename(filepath)}')
-            except Exception as e:
-                messagebox.showerror('保存失败', f'保存截图时出错：{e}')
-
-        tk.Button(btn_frame, text='📥 导入识别', command=import_to_ocr,
-                  bg='#1A6FD4', fg='white', font=('Microsoft YaHei', 10),
-                  padx=18, pady=8, cursor='hand2').pack(side=tk.LEFT, padx=4)
-        tk.Button(btn_frame, text='💾 保存图片', command=save_merged,
-                  bg='#4CAF50', fg='white', font=('Microsoft YaHei', 10),
-                  padx=18, pady=8, cursor='hand2').pack(side=tk.LEFT, padx=4)
-        if retake_fn:
-            tk.Button(btn_frame, text='🔄 重新截图', command=retake_fn,
-                      bg='#FF9800', fg='white', font=('Microsoft YaHei', 10),
-                      padx=18, pady=8, cursor='hand2').pack(side=tk.LEFT, padx=4)
-        tk.Button(btn_frame, text='取消', command=lambda: self._nav_to('OCR识别'),
-                  bg='#757575', fg='white', font=('Microsoft YaHei', 10),
-                  padx=18, pady=8, cursor='hand2').pack(side=tk.LEFT, padx=4)
+                filetypes=[('PNG 图片', '*.png'), ('JPEG 图片', '*.jpg'), ('所有文件', '*.*')],
+                title='保存拼接图片', initialfile=default_name)
+            if path:
+                merged.save(path)
+                messagebox.showinfo('保存成功', f'图片已保存：
 
     def start_screenshot_capture(self):
         """启动屏幕截图拼接功能：多次框选截图，从右到左拼接，Enter确认，预览后识别"""

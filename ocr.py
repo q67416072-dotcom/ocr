@@ -331,6 +331,8 @@ class DataStore:
             'popup_windows': {},
             'merge_save_path': '',
             'export_save_path': '',
+            'merge_history': [],
+            'gallery_ocr_limit': 30,
             'preview_ocr_defaults': {'merge': 'accurate', 'crop': 'general', 'screenshot': 'general'},
             'tree_column_widths': {}
         }
@@ -438,6 +440,11 @@ class OCRApp:
 
         # 拼接图片保存路径
         self.merge_save_path = self.store.get('merge_save_path', '')
+        self._merge_history = self._load_persistent_merge_history()
+        try:
+            self.gallery_ocr_limit = int(self.store.get('gallery_ocr_limit', 30))
+        except (ValueError, TypeError):
+            self.gallery_ocr_limit = 30
         # 导出文件保存路径
         self.export_save_path = self.store.get('export_save_path', '')
 
@@ -2682,6 +2689,8 @@ class OCRApp:
                 progress_text=f'✓ 拼接图片已导入，请点击「▶ 开始识别」',
                 save_prefix=f'拼接{len(images)}张',
                 ocr_mode=ocr_mode,
+                gallery_type='file',
+                source_paths=list(file_paths),
             )
 
         self._show_merged_image_preview(
@@ -2700,6 +2709,10 @@ class OCRApp:
         header.pack(fill=tk.X, padx=24, pady=(18, 8))
         tk.Label(header, text='🖼 图片预览', bg='white', fg='#111827',
                  font=('Microsoft YaHei', 14, 'bold')).pack(side=tk.LEFT)
+        tk.Button(header, text='清空', command=self._clear_gallery_preview,
+                  bg='#FEF2F2', fg='#DC2626', relief='flat',
+                  font=('Microsoft YaHei', 9), padx=10, pady=4,
+                  cursor='hand2').pack(side=tk.RIGHT, padx=(6, 0))
         tk.Button(header, text='🔄 刷新', command=self._build_gallery_page,
                   bg='#EFF6FF', fg='#1A6FD4', relief='flat',
                   font=('Microsoft YaHei', 9), padx=10, pady=4,
@@ -2711,15 +2724,37 @@ class OCRApp:
 
         # 1. 拼接历史（置顶）
         for entry in getattr(self, '_merge_history', []):
+            output_path = entry.get('output_path', '')
+            if output_path and not os.path.exists(output_path):
+                continue
             cards.append({'type': 'merge', 'entry': entry})
 
-        # 2. 已识别图片
+        # 2. 已识别图片（按最近识别时间显示，可在设置里限制数量）
+        try:
+            ocr_limit = int(getattr(self, 'gallery_ocr_limit', 30))
+        except (ValueError, TypeError):
+            ocr_limit = 30
+
         seen = set()
+        ocr_candidates = []
         for r in (getattr(self, 'all_results', []) or []):
             p = r.get('path', '')
-            if p and os.path.exists(p) and p not in seen:
-                seen.add(p)
-                cards.append({'type': 'ocr', 'path': p})
+            if p and os.path.exists(p):
+                ocr_candidates.append(('9999-12-31 23:59:59', p))
+        for record in (self.store.get('ocr_cache', {}) or {}).values():
+            p = record.get('path', '')
+            if p and os.path.exists(p):
+                ocr_candidates.append((record.get('updated_at', ''), p))
+
+        ocr_count = 0
+        for _, p in sorted(ocr_candidates, key=lambda item: item[0], reverse=True):
+            if p in seen:
+                continue
+            seen.add(p)
+            cards.append({'type': 'ocr', 'path': p})
+            ocr_count += 1
+            if ocr_limit > 0 and ocr_count >= ocr_limit:
+                break
 
         if not cards:
             empty = tk.Frame(page, bg='white')
@@ -2784,7 +2819,13 @@ class OCRApp:
                     entry = card['entry']
                     badge_key = entry['type']
                     data = entry.get('data', [])
-                    if data:
+                    output_path = entry.get('output_path', '')
+                    if output_path and os.path.exists(output_path):
+                        img = Image.open(output_path)
+                        img.thumbnail((THUMB_W, THUMB_W), Image.Resampling.LANCZOS)
+                        thumb_img = ImageTk.PhotoImage(img)
+                        self._gallery_thumbs.append(thumb_img)
+                    elif data:
                         src = Image.open(data[0]) if entry['type'] == 'file' else data[0]
                         img = src.copy()
                         img.thumbnail((THUMB_W, THUMB_W), Image.Resampling.LANCZOS)
@@ -2805,6 +2846,9 @@ class OCRApp:
                 pass
 
             bg_col, badge_text = TAG_COLORS.get(badge_key, ('#6B7280', ''))
+            if card['type'] == 'merge' and card['entry'].get('recognized'):
+                badge_text = f'{badge_text} 已识别'
+                bg_col = '#16A34A'
 
             card_frame = tk.Frame(parent, bg='white', relief='solid',
                                   bd=1, highlightbackground='#E5E7EB')
@@ -2891,6 +2935,30 @@ class OCRApp:
             if e.widget == page and e.width > 50:
                 _delayed_layout()
         page.bind('<Configure>', _on_resize, add='+')
+
+    def _clear_gallery_preview(self):
+        """Clear gallery preview records without deleting image files or OCR text cache."""
+        if not messagebox.askyesno(
+            "确认清空",
+            "确定要清空图片预览吗？\n\n这不会删除图片文件，也不会删除 OCR 缓存内容。"
+        ):
+            return
+
+        self._merge_history = []
+        self.store.set('merge_history', [])
+        self.all_results = []
+
+        cache = self.store.get('ocr_cache', {}) or {}
+        changed = False
+        for record in cache.values():
+            if isinstance(record, dict) and record.get('path'):
+                record['path'] = ''
+                changed = True
+        if changed:
+            self.store.set('ocr_cache', cache)
+
+        self._build_gallery_page()
+        self.show_toast('✓ 图片预览已清空')
 
     def _run_ocr_with_callback(self, thread_func, callback):
         """启动识别线程，完成后在主线程执行 callback"""
@@ -8498,6 +8566,8 @@ class OCRApp:
                     progress_text="✓ 拼接图片已导入，请点击「▶ 开始识别」",
                     save_prefix=f'拼接{len(images)}张',
                     ocr_mode=ocr_mode,
+                    gallery_type='file',
+                    source_paths=list(file_paths),
                 )
 
             self._show_merged_image_preview(
@@ -8507,8 +8577,127 @@ class OCRApp:
         except Exception as e:
             messagebox.showerror("错误", f"拼接失败：{str(e)}")
 
+    def _default_merge_image_dir(self):
+        return Path(__file__).parent / 'merged_images'
+
+    def _save_merged_image_for_gallery(self, merged_image, save_prefix, suffix):
+        """Save a merged image to a stable path used by gallery/history restore."""
+        suffix = suffix if suffix.startswith('.') else f'.{suffix}'
+        image_format = 'PNG' if suffix.lower() == '.png' else 'JPEG'
+        target_dir = Path(self.merge_save_path) if self.merge_save_path else self._default_merge_image_dir()
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = self._make_image_filename(save_prefix, suffix)
+        save_path = target_dir / filename
+        stem = save_path.stem
+        idx = 1
+        while save_path.exists():
+            save_path = target_dir / f'{stem}_{idx}{suffix}'
+            idx += 1
+
+        save_kwargs = {} if image_format == 'PNG' else {'quality': 95}
+        merged_image.save(str(save_path), format=image_format, **save_kwargs)
+        return str(save_path)
+
+    def _load_persistent_merge_history(self):
+        entries = self.store.get('merge_history', []) or []
+        cleaned = []
+        for entry in entries:
+            output_path = entry.get('output_path', '')
+            if not output_path or not os.path.exists(output_path):
+                continue
+            source_type = entry.get('type', 'file')
+            source_paths = [p for p in entry.get('source_paths', []) if isinstance(p, str)]
+            cleaned.append({
+                'type': source_type,
+                'data': source_paths if source_type == 'file' else [],
+                'source_paths': source_paths,
+                'output_path': output_path,
+                'label': entry.get('label', source_type),
+                'desc': entry.get('desc') or os.path.basename(output_path),
+                'time': entry.get('time', ''),
+                'recognized': bool(entry.get('recognized', False)),
+                'recognized_type': entry.get('recognized_type', ''),
+                'recognized_at': entry.get('recognized_at', ''),
+            })
+        if len(cleaned) != len(entries):
+            self.store.set('merge_history', self._serializable_merge_history(cleaned))
+        return cleaned[:20]
+
+    def _serializable_merge_history(self, entries=None):
+        serializable = []
+        for entry in (entries if entries is not None else getattr(self, '_merge_history', [])):
+            output_path = entry.get('output_path', '')
+            if not output_path or not os.path.exists(output_path):
+                continue
+            serializable.append({
+                'type': entry.get('type', 'file'),
+                'source_paths': entry.get('source_paths', entry.get('data', []) if entry.get('type') == 'file' else []),
+                'output_path': output_path,
+                'label': entry.get('label', ''),
+                'desc': entry.get('desc', os.path.basename(output_path)),
+                'time': entry.get('time', ''),
+                'recognized': bool(entry.get('recognized', False)),
+                'recognized_type': entry.get('recognized_type', ''),
+                'recognized_at': entry.get('recognized_at', ''),
+            })
+        return serializable[:20]
+
+    def _persist_merge_history(self):
+        self.store.set('merge_history', self._serializable_merge_history())
+
+    def _add_persistent_merge_history(self, source_type, output_path, source_paths=None, desc=None):
+        if not output_path or not os.path.exists(output_path):
+            return
+        label_map = {'file': '文件拼接', 'screenshot': '截图拼接', 'crop': '裁剪拼接'}
+        source_paths = list(source_paths or [])
+        if desc is None:
+            desc = os.path.basename(output_path)
+        entry = {
+            'type': source_type,
+            'data': source_paths if source_type == 'file' else [],
+            'source_paths': source_paths,
+            'output_path': output_path,
+            'label': label_map.get(source_type, source_type),
+            'desc': desc,
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'recognized': False,
+            'recognized_type': '',
+            'recognized_at': '',
+        }
+
+        current = []
+        for old in getattr(self, '_merge_history', []):
+            if old.get('output_path') == output_path:
+                continue
+            if not old.get('output_path') and old.get('type') == source_type:
+                if source_type != 'file' or old.get('data') == source_paths:
+                    continue
+            current.append(old)
+        self._merge_history = [entry] + current
+        self._merge_history = self._merge_history[:20]
+        self._persist_merge_history()
+
+    def _mark_merge_image_recognized(self, image_path, ocr_type):
+        if not image_path:
+            return
+        try:
+            target = os.path.abspath(image_path)
+            changed = False
+            for entry in getattr(self, '_merge_history', []):
+                output_path = entry.get('output_path', '')
+                if output_path and os.path.abspath(output_path) == target:
+                    entry['recognized'] = True
+                    entry['recognized_type'] = ocr_type
+                    entry['recognized_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    changed = True
+            if changed:
+                self._persist_merge_history()
+        except Exception as e:
+            print(f"标记拼接图片已识别失败: {e}")
+
     def _add_merge_history(self, source_type, data):
-        """添加一条拼接历史记录，最多保留5条"""
+        """添加一条拼接历史记录，最多保留20条"""
         if not hasattr(self, '_merge_history'):
             self._merge_history = []
         from datetime import datetime
@@ -8527,7 +8716,7 @@ class OCRApp:
             'time': datetime.now().strftime('%H:%M:%S'),
         }
         self._merge_history.insert(0, entry)
-        self._merge_history = self._merge_history[:5]
+        self._merge_history = self._merge_history[:20]
 
     def _reopen_last_merge_preview(self):
         """重新打开上次拼接预览，支持文件拼接、截图拼接、裁剪拼接三种来源"""
@@ -8542,7 +8731,16 @@ class OCRApp:
         """根据一条历史记录重新打开拼接预览"""
         source_type = entry['type']
         data = entry['data']
+        output_path = entry.get('output_path', '')
         try:
+            if (not data) and output_path and os.path.exists(output_path):
+                self.image_paths = [output_path]
+                self.all_results = []
+                self.file_label.config(text=f"已选择: {os.path.basename(output_path)}", fg='blue')
+                self.progress_label.config(text='✓ 已导入保存的拼接图片，请点击「▶ 开始识别」', fg='#16A34A')
+                self._nav_to('OCR识别')
+                return
+
             if source_type == 'screenshot':
                 # 截图历史直接重建截图预览页，不走拼接预览
                 self._reopen_screenshot_preview(data)
@@ -8561,6 +8759,8 @@ class OCRApp:
                         progress_text="✓ 拼接图片已导入，请点击「▶ 开始识别」",
                         save_prefix=f'拼接{len(images)}张',
                         ocr_mode=ocr_mode,
+                        gallery_type='file',
+                        source_paths=list(data),
                     )
 
             elif source_type == 'screenshot':
@@ -8578,6 +8778,7 @@ class OCRApp:
                         ocr_mode=ocr_mode,
                         suffix='.png',
                         file_label_fg='#1E5A8A',
+                        gallery_type='screenshot',
                     )
 
             else:  # crop
@@ -8593,6 +8794,7 @@ class OCRApp:
                         progress_text='✓ 裁剪拼接图片已导入，请点击「▶ 开始识别」',
                         save_prefix=f'裁剪{len(images)}张',
                         ocr_mode=ocr_mode,
+                        gallery_type='crop',
                     )
 
             self._show_merged_image_preview(
@@ -9027,6 +9229,7 @@ class OCRApp:
             return image_hash, {
                 'file': os.path.basename(image_path),
                 'path': image_path,
+                'type': record.get('type', ocr_type),
                 'lines': record.get('lines', []),
                 'count': len(record.get('lines', [])),
                 'cached': True,
@@ -9052,10 +9255,12 @@ class OCRApp:
                 'updated_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             self.store.set('ocr_cache', cache)
+            self._mark_merge_image_recognized(image_path, ocr_type)
         except Exception as e:
             print(f"保存OCR缓存失败: {e}")
 
     def append_cached_ocr_result(self, image_path, cached_result):
+        self._mark_merge_image_recognized(image_path, cached_result.get('type', 'cached'))
         cached_from = cached_result.get('cached_from') or cached_result.get('file', '')
         if cached_from and cached_from != os.path.basename(image_path):
             detail = f"（来源: {cached_from}）"
@@ -11540,7 +11745,7 @@ class OCRApp:
     
     def show_settings_panel(self):
         """右上角设置面板：书籍信息 + 导出设置 + 快捷操作"""
-        win = self.create_popup_window(self.root, "设置", "top_settings", 480, 580)
+        win = self.create_popup_window(self.root, "设置", "top_settings", 480, 650)
         BG = 'white'
 
         # ── 导出设置 ──
@@ -11655,6 +11860,45 @@ class OCRApp:
             self._clear_merge_save_path(), _refresh_merge_lbl()),
                   bg='#E5E7EB', fg='#EF4444', relief='flat',
                   font=('Microsoft YaHei', 8), padx=6, cursor='hand2').pack(side=tk.LEFT)
+
+        # ── 图片预览设置 ──
+        sec_gallery = tk.LabelFrame(win, text='🖼 图片预览设置', padx=12, pady=10, bg=BG,
+                                    font=('Microsoft YaHei', 10, 'bold'), fg='#374151')
+        sec_gallery.pack(fill=tk.X, padx=20, pady=(12, 0))
+
+        gallery_row = tk.Frame(sec_gallery, bg=BG)
+        gallery_row.pack(fill=tk.X)
+        tk.Label(gallery_row, text='已识别图片显示最近', bg=BG, fg='#374151',
+                 font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
+        gallery_limit_var = tk.StringVar(value=str(getattr(self, 'gallery_ocr_limit', 30)))
+        gallery_limit_entry = tk.Entry(gallery_row, textvariable=gallery_limit_var, width=7,
+                                       font=('Microsoft YaHei', 9), relief='flat',
+                                       highlightthickness=1, highlightbackground='#DDE3EA',
+                                       justify='center')
+        gallery_limit_entry.pack(side=tk.LEFT, padx=6, ipady=3)
+        tk.Label(gallery_row, text='条（0 = 不限制）', bg=BG, fg='#6B7280',
+                 font=('Microsoft YaHei', 9)).pack(side=tk.LEFT)
+
+        gallery_msg = tk.Label(sec_gallery, text='', bg=BG, font=('Microsoft YaHei', 8))
+        gallery_msg.pack(anchor='w', pady=(2, 0))
+
+        def save_gallery_limit():
+            try:
+                new_limit = int(gallery_limit_var.get())
+                if new_limit < 0:
+                    gallery_msg.config(text='❌ 不能为负数', fg='#EF4444')
+                    return
+                self.gallery_ocr_limit = new_limit
+                self.store.set('gallery_ocr_limit', new_limit)
+                gallery_msg.config(text='✅ 已保存，刷新图片预览后生效', fg='#16A34A')
+            except ValueError:
+                gallery_msg.config(text='❌ 请输入有效数字', fg='#EF4444')
+
+        tk.Button(gallery_row, text='保存', command=save_gallery_limit,
+                  bg='#1A6FD4', fg='white', relief='flat',
+                  font=('Microsoft YaHei', 8), padx=10, pady=3,
+                  cursor='hand2').pack(side=tk.LEFT, padx=(8, 0))
+        gallery_limit_entry.bind('<Return>', lambda e: save_gallery_limit())
 
         # ── 历史记录设置 ──
         sec_hist = tk.LabelFrame(win, text='📝 历史记录', padx=12, pady=10, bg=BG,
@@ -12351,29 +12595,37 @@ class OCRApp:
 
     def _import_merged_image_without_ocr(self, merged_image, display_text, progress_text,
                                          save_prefix, ocr_mode=None, suffix='.jpg',
-                                         file_label_fg='blue'):
+                                         file_label_fg='blue', gallery_type=None,
+                                         source_paths=None):
         """将拼接结果导入为待识别图片，但不自动执行 OCR。"""
         import tempfile
 
         suffix = suffix if suffix.startswith('.') else f'.{suffix}'
         image_format = 'PNG' if suffix.lower() == '.png' else 'JPEG'
 
-        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-        tmp.close()
-        temp_kwargs = {} if image_format == 'PNG' else {'quality': 90}
-        merged_image.save(tmp.name, format=image_format, **temp_kwargs)
+        save_path = ''
+        try:
+            save_path = self._save_merged_image_for_gallery(merged_image, save_prefix, suffix)
+            self.show_toast(f'✓ 已保存：{os.path.basename(save_path)}')
+        except Exception as e:
+            print(f'拼接图片自动保存失败: {e}')
 
-        if self.merge_save_path:
-            try:
-                filename = self._make_image_filename(save_prefix, suffix)
-                save_path = os.path.join(self.merge_save_path, filename)
-                save_kwargs = {} if image_format == 'PNG' else {'quality': 95}
-                merged_image.save(save_path, format=image_format, **save_kwargs)
-                self.show_toast(f'✓ 已保存：{filename}')
-            except Exception as e:
-                print(f'拼接图片自动保存失败: {e}')
+        if not save_path:
+            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+            tmp.close()
+            temp_kwargs = {} if image_format == 'PNG' else {'quality': 90}
+            merged_image.save(tmp.name, format=image_format, **temp_kwargs)
+            save_path = tmp.name
 
-        self.image_paths = [tmp.name]
+        if gallery_type:
+            self._add_persistent_merge_history(
+                gallery_type,
+                save_path,
+                source_paths=source_paths,
+                desc=os.path.basename(save_path),
+            )
+
+        self.image_paths = [save_path]
         self.all_results = []
         self.file_label.config(text=display_text, fg=file_label_fg)
         self.progress_label.config(text=progress_text, fg='#16A34A')
@@ -12435,6 +12687,8 @@ class OCRApp:
                     progress_text="✓ 拼接图片已导入，请点击「▶ 开始识别」",
                     save_prefix=f'拼接{len(images)}张',
                     ocr_mode=ocr_mode,
+                    gallery_type='file',
+                    source_paths=list(file_paths),
                 )
 
             self._show_merged_image_preview(
@@ -12591,6 +12845,7 @@ class OCRApp:
                 ocr_mode=shot_mode[0],
                 suffix='.png',
                 file_label_fg='#1E5A8A',
+                gallery_type='screenshot',
             )
             self._nav_to('OCR识别')
             self.root.update_idletasks()
@@ -13322,6 +13577,7 @@ class OCRApp:
                             progress_text='✓ 裁剪拼接图片已导入，请点击「▶ 开始识别」',
                             save_prefix=f'裁剪{len(cropped_images)}张',
                             ocr_mode=ocr_mode,
+                            gallery_type='crop',
                         )
 
                     self._show_merged_image_preview(

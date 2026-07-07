@@ -2676,15 +2676,13 @@ class OCRApp:
         def on_choice(choice, merged_image, total_width, max_height, ocr_mode):
             if choice == 'cancel':
                 return
-            save_path = self._save_merged_image(merged_image, len(images), total_width, max_height)
-            if not save_path:
-                return
-            self.progress_label.config(text=f'✓ 拼接图片已保存：{os.path.basename(save_path)}')
-            self.image_paths = [save_path]
-            self.file_label.config(
-                text=f'已选择: 拼接图片 ({len(images)}张) - {total_width}x{max_height}',
-                fg='blue')
-            self._run_ocr_by_mode(ocr_mode)
+            self._import_merged_image_without_ocr(
+                merged_image,
+                display_text=f'已选择: 拼接图片 ({len(images)}张) - {total_width}x{max_height}',
+                progress_text=f'✓ 拼接图片已导入，请点击「▶ 开始识别」',
+                save_prefix=f'拼接{len(images)}张',
+                ocr_mode=ocr_mode,
+            )
 
         self._show_merged_image_preview(
             images, item_label='图片数量', item_action='选择', preview_type='merge'
@@ -8467,7 +8465,7 @@ class OCRApp:
                                bg='#FF9800', fg='white', font=('Microsoft YaHei', 10),
                                padx=18, pady=8)
         switch_btn.pack(side=tk.LEFT, padx=6)
-        tk.Button(btn_frame, text='💾 保存并识别', command=lambda: choose('save'),
+        tk.Button(btn_frame, text='导入识别', command=lambda: choose('import'),
                   bg='#4CAF50', fg='white', font=('Microsoft YaHei', 10),
                   padx=18, pady=8).pack(side=tk.LEFT, padx=6)
         tk.Button(btn_frame, text='取消', command=lambda: choose('cancel'),
@@ -8494,19 +8492,13 @@ class OCRApp:
                 if choice == 'cancel':
                     return
 
-                save_path = self._save_merged_image(merged_image, len(images), total_width, max_height)
-                if not save_path:
-                    return  # 用户取消保存
-
-                self.progress_label.config(
-                    text=f"✓ 拼接图片已保存到：{os.path.basename(save_path)}")
-
-                self.image_paths = [save_path]
-                self.file_label.config(
-                    text=f"已选择: 拼接图片 ({len(images)}张) - {total_width}x{max_height}",
-                    fg="blue")
-
-                self._run_ocr_by_mode(ocr_mode)
+                self._import_merged_image_without_ocr(
+                    merged_image,
+                    display_text=f"已选择: 拼接图片 ({len(images)}张) - {total_width}x{max_height}",
+                    progress_text="✓ 拼接图片已导入，请点击「▶ 开始识别」",
+                    save_prefix=f'拼接{len(images)}张',
+                    ocr_mode=ocr_mode,
+                )
 
             self._show_merged_image_preview(
                 images, item_label="图片数量", item_action="选择", preview_type='merge'
@@ -8563,14 +8555,13 @@ class OCRApp:
                 def on_choice(choice, merged_image, total_width, max_height, ocr_mode):
                     if choice == 'cancel':
                         return
-                    save_path = self._save_merged_image(merged_image, len(images), total_width, max_height)
-                    if not save_path:
-                        return
-                    self.progress_label.config(text=f"✓ 拼接图片已保存到：{os.path.basename(save_path)}")
-                    self.image_paths = [save_path]
-                    self.file_label.config(
-                        text=f"已选择: 拼接图片 ({len(images)}张) - {total_width}x{max_height}", fg="blue")
-                    self._run_ocr_by_mode(ocr_mode)
+                    self._import_merged_image_without_ocr(
+                        merged_image,
+                        display_text=f"已选择: 拼接图片 ({len(images)}张) - {total_width}x{max_height}",
+                        progress_text="✓ 拼接图片已导入，请点击「▶ 开始识别」",
+                        save_prefix=f'拼接{len(images)}张',
+                        ocr_mode=ocr_mode,
+                    )
 
             elif source_type == 'screenshot':
                 images = data
@@ -8579,25 +8570,15 @@ class OCRApp:
                 def on_choice(choice, merged_image, total_width, max_height, ocr_mode):
                     if choice == 'cancel':
                         return
-                    import tempfile
-                    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                    tmp.close()
-                    merged_image.save(tmp.name)
-                    if choice == 'save':
-                        try:
-                            filename = self._make_image_filename('截图拼接', '.png')
-                            save_dir = self.merge_save_path or os.path.expanduser('~\\Pictures')
-                            os.makedirs(save_dir, exist_ok=True)
-                            save_path = os.path.join(save_dir, filename)
-                            merged_image.save(save_path)
-                            self.show_toast(f'✓ 已保存：{filename}')
-                        except Exception as e:
-                            print(f'截图保存失败: {e}')
-                    self.image_paths = [tmp.name]
-                    self.file_label.config(
-                        text=f'截图拼接：{total_width}×{max_height} px，{len(images)} 张', fg='#1E5A8A')
-                    self._sync_ocr_sidebar_mode(ocr_mode)
-                    self._run_ocr_by_mode(ocr_mode)
+                    self._import_merged_image_without_ocr(
+                        merged_image,
+                        display_text=f'截图拼接：{total_width}×{max_height} px，{len(images)} 张',
+                        progress_text='✓ 截图拼接图片已导入，请点击「▶ 开始识别」',
+                        save_prefix='截图拼接',
+                        ocr_mode=ocr_mode,
+                        suffix='.png',
+                        file_label_fg='#1E5A8A',
+                    )
 
             else:  # crop
                 images = data
@@ -8606,21 +8587,13 @@ class OCRApp:
                 def on_choice(choice, merged_image, total_width, max_height, ocr_mode):
                     if choice == 'cancel':
                         return
-                    import tempfile
-                    temp_dir = tempfile.gettempdir()
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    temp_path = os.path.join(temp_dir, f"cropped_merged_ocr_{timestamp}.jpg")
-                    merged_image.save(temp_path, format='JPEG', quality=90)
-                    if choice == 'save':
-                        filename = self._make_image_filename(f'裁剪{len(images)}张')
-                        save_dir = self.merge_save_path or os.path.expanduser('~\\Pictures')
-                        os.makedirs(save_dir, exist_ok=True)
-                        merged_image.save(os.path.join(save_dir, filename), format='JPEG', quality=95)
-                        self.show_toast(f'✓ 已保存：{filename}')
-                    self.image_paths = [temp_path]
-                    self.file_label.config(
-                        text=f"裁剪拼接图片 ({len(images)}个区域) - 宽{total_width} x 高{max_height}", fg="blue")
-                    self._run_ocr_by_mode(ocr_mode)
+                    self._import_merged_image_without_ocr(
+                        merged_image,
+                        display_text=f"裁剪拼接图片 ({len(images)}个区域) - 宽{total_width} x 高{max_height}",
+                        progress_text='✓ 裁剪拼接图片已导入，请点击「▶ 开始识别」',
+                        save_prefix=f'裁剪{len(images)}张',
+                        ocr_mode=ocr_mode,
+                    )
 
             self._show_merged_image_preview(
                 images, item_label=item_label, item_action=item_action, preview_type=preview_type
@@ -12376,6 +12349,37 @@ class OCRApp:
         parts.append(timestamp)
         return '_'.join(parts) + ext
 
+    def _import_merged_image_without_ocr(self, merged_image, display_text, progress_text,
+                                         save_prefix, ocr_mode=None, suffix='.jpg',
+                                         file_label_fg='blue'):
+        """将拼接结果导入为待识别图片，但不自动执行 OCR。"""
+        import tempfile
+
+        suffix = suffix if suffix.startswith('.') else f'.{suffix}'
+        image_format = 'PNG' if suffix.lower() == '.png' else 'JPEG'
+
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.close()
+        temp_kwargs = {} if image_format == 'PNG' else {'quality': 90}
+        merged_image.save(tmp.name, format=image_format, **temp_kwargs)
+
+        if self.merge_save_path:
+            try:
+                filename = self._make_image_filename(save_prefix, suffix)
+                save_path = os.path.join(self.merge_save_path, filename)
+                save_kwargs = {} if image_format == 'PNG' else {'quality': 95}
+                merged_image.save(save_path, format=image_format, **save_kwargs)
+                self.show_toast(f'✓ 已保存：{filename}')
+            except Exception as e:
+                print(f'拼接图片自动保存失败: {e}')
+
+        self.image_paths = [tmp.name]
+        self.all_results = []
+        self.file_label.config(text=display_text, fg=file_label_fg)
+        self.progress_label.config(text=progress_text, fg='#16A34A')
+        if ocr_mode:
+            self._sync_ocr_sidebar_mode(ocr_mode)
+
     def _save_merged_image(self, merged_image, image_count, total_width, max_height):
         """根据是否设置了保存路径，直接保存或弹出对话框。返回保存路径或 None"""
         if self.merge_save_path:
@@ -12425,25 +12429,13 @@ class OCRApp:
                 if choice == 'cancel':
                     return
 
-                if not self._has_ocr_key(ocr_mode):
-                    mode_names = {'accurate': '高精度', 'basic': '快速', 'general': '通用'}
-                    messagebox.showwarning("警告",
-                        f"需要{mode_names.get(ocr_mode, ocr_mode)}识别密钥，请在「密钥」页配置后重试")
-                    return
-
-                save_path = self._save_merged_image(merged_image, len(images), total_width, max_height)
-                if not save_path:
-                    return
-
-                self.progress_label.config(
-                    text=f"✓ 拼接图片已保存到：{os.path.basename(save_path)}")
-
-                self.image_paths = [save_path]
-                self.file_label.config(
-                    text=f"已选择: 拼接图片 ({len(images)}张) - {total_width}x{max_height}",
-                    fg="blue")
-
-                self._run_ocr_by_mode(ocr_mode)
+                self._import_merged_image_without_ocr(
+                    merged_image,
+                    display_text=f"已选择: 拼接图片 ({len(images)}张) - {total_width}x{max_height}",
+                    progress_text="✓ 拼接图片已导入，请点击「▶ 开始识别」",
+                    save_prefix=f'拼接{len(images)}张',
+                    ocr_mode=ocr_mode,
+                )
 
             self._show_merged_image_preview(
                 images, item_label="图片数量", item_action="选择", preview_type='merge'
@@ -12591,25 +12583,17 @@ class OCRApp:
         btn_frame.pack(fill=tk.X, padx=24, pady=(4, 16))
 
         def confirm_ocr():
-            import tempfile
-            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-            tmp.close()
-            merged.save(tmp.name)
-            if self.merge_save_path:
-                try:
-                    filename = self._make_image_filename('截图拼接', '.png')
-                    save_path = os.path.join(self.merge_save_path, filename)
-                    merged.save(save_path)
-                    self.show_toast(f'✓ 已保存：{filename}')
-                except Exception as e:
-                    print(f'截图自动保存失败: {e}')
-            self.image_paths = [tmp.name]
-            self.all_results = []
-            self.file_label.config(
-                text=f'截图拼接：{w}×{h} px，{len(captured_shots)} 张', fg='#1E5A8A')
-            self._sync_ocr_sidebar_mode(shot_mode[0])
+            self._import_merged_image_without_ocr(
+                merged,
+                display_text=f'截图拼接：{w}×{h} px，{len(captured_shots)} 张',
+                progress_text='✓ 截图拼接图片已导入，请点击「▶ 开始识别」',
+                save_prefix='截图拼接',
+                ocr_mode=shot_mode[0],
+                suffix='.png',
+                file_label_fg='#1E5A8A',
+            )
             self._nav_to('OCR识别')
-            self._run_ocr_by_mode(shot_mode[0], delay=100)
+            self.root.update_idletasks()
 
         def save_merged():
             default_name = self._make_image_filename('截图拼接', '.png')
@@ -12619,7 +12603,21 @@ class OCRApp:
                 title='保存拼接图片', initialfile=default_name)
             if path:
                 merged.save(path)
-                messagebox.showinfo('保存成功', f'图片已保存：
+                messagebox.showinfo('保存成功', f'图片已保存：\n{path}')
+
+        if retake_fn:
+            tk.Button(btn_frame, text='重新截图', command=retake_fn,
+                      bg='#FF9800', fg='white', font=('Microsoft YaHei', 10),
+                      padx=18, pady=8).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text='导入识别', command=confirm_ocr,
+                  bg='#4CAF50', fg='white', font=('Microsoft YaHei', 10),
+                  padx=18, pady=8).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text='保存图片', command=save_merged,
+                  bg='#1A6FD4', fg='white', font=('Microsoft YaHei', 10),
+                  padx=18, pady=8).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text='取消', command=lambda: self._nav_to('OCR识别'),
+                  bg='#757575', fg='white', font=('Microsoft YaHei', 10),
+                  padx=18, pady=8).pack(side=tk.LEFT, padx=6)
 
     def start_screenshot_capture(self):
         """启动屏幕截图拼接功能：多次框选截图，从右到左拼接，Enter确认，预览后识别"""
@@ -13313,35 +13311,18 @@ class OCRApp:
                         if user_choice == 'cancel':
                             return
 
-                        import tempfile
-                        temp_dir = tempfile.gettempdir()
-                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        temp_path = os.path.join(temp_dir, f"cropped_merged_ocr_{timestamp}.jpg")
-                        merged.save(temp_path, format='JPEG', quality=90)
-
-                        if user_choice == 'save':
-                            filename = self._make_image_filename(f'裁剪{len(cropped_images)}张')
-                            save_dir = self.merge_save_path or os.path.expanduser('~\\Pictures')
-                            os.makedirs(save_dir, exist_ok=True)
-                            save_path = os.path.join(save_dir, filename)
-                            merged.save(save_path, format='JPEG', quality=95)
-                            self.show_toast(f'✓ 已保存：{os.path.basename(save_path)}')
-
                         self.result_text.delete(1.0, tk.END)
                         self.result_text.insert(tk.END, f"✓ 已裁剪 {len(cropped_images)} 个区域并拼接\n")
                         self.result_text.insert(tk.END, f"✓ 拼接尺寸: 宽{total_width} x 高{max_height}\n")
-                        if user_choice == 'save':
-                            self.result_text.insert(tk.END, "="*80 + "\n")
-                            self.result_text.insert(tk.END, f"✓ 图片已保存\n")
-                        self.result_text.insert(tk.END, "正在识别拼接后的图片，请稍候...\n\n")
+                        self.result_text.insert(tk.END, "✓ 图片已导入，请点击「开始识别」\n\n")
 
-                        self.image_paths = [temp_path]
-                        self.file_label.config(
-                            text=f"裁剪拼接图片 ({len(cropped_images)}个区域) - 宽{total_width} x 高{max_height}",
-                            fg="blue"
+                        self._import_merged_image_without_ocr(
+                            merged,
+                            display_text=f"裁剪拼接图片 ({len(cropped_images)}个区域) - 宽{total_width} x 高{max_height}",
+                            progress_text='✓ 裁剪拼接图片已导入，请点击「▶ 开始识别」',
+                            save_prefix=f'裁剪{len(cropped_images)}张',
+                            ocr_mode=ocr_mode,
                         )
-
-                        self._run_ocr_by_mode(ocr_mode)
 
                     self._show_merged_image_preview(
                         cropped_images, item_label="区域数量", item_action="框选",

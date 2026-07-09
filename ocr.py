@@ -24,7 +24,6 @@ except Exception:
 
 plt = None
 FigureCanvasTkAgg = None
-NavigationToolbar2Tk = None
 LassoSelector = None
 MplPath = None
 font_manager = None
@@ -80,20 +79,18 @@ def configure_styles_force():
 
 def ensure_matplotlib_loaded():
     """延迟加载 matplotlib，避免拖慢软件首次打开。"""
-    global plt, FigureCanvasTkAgg, NavigationToolbar2Tk, LassoSelector, MplPath, font_manager, _matplotlib_loaded
+    global plt, FigureCanvasTkAgg, LassoSelector, MplPath, font_manager, _matplotlib_loaded
     if _matplotlib_loaded:
         return
 
     import matplotlib.pyplot as _plt
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvasTkAgg
-    from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk as _NavigationToolbar2Tk
     from matplotlib.widgets import LassoSelector as _LassoSelector
     from matplotlib.path import Path as _MplPath
     from matplotlib import font_manager as _font_manager
 
     plt = _plt
     FigureCanvasTkAgg = _FigureCanvasTkAgg
-    NavigationToolbar2Tk = _NavigationToolbar2Tk
     LassoSelector = _LassoSelector
     MplPath = _MplPath
     font_manager = _font_manager
@@ -3445,10 +3442,6 @@ class OCRApp:
         self.fig, self.ax = plt.subplots(figsize=(6, 6), dpi=100)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.tab_plt)
         self.canvas.mpl_connect('button_press_event', self.on_plot_click)
-
-        # 添加 matplotlib 工具栏
-        toolbar = NavigationToolbar2Tk(self.canvas, self.tab_plt)
-        toolbar.update()
 
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.plot_initialized = True

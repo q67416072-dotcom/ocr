@@ -1893,10 +1893,57 @@ class OCRApp:
         tk.Label(page, text='修改后点击保存，立即生效', bg='white', fg='#9CA3AF',
                  font=('Microsoft YaHei', 9)).pack(anchor='w', padx=24, pady=(0, 12))
 
+        BORDER = '#DDE3EA'
+        key_entries = []
+        hide_keys_after_id = None
+        reveal_keys_btn = None
+
+        def hide_keys():
+            nonlocal hide_keys_after_id
+            for entry in key_entries:
+                entry.configure(show='*')
+            if reveal_keys_btn:
+                reveal_keys_btn.configure(text='临时显示密钥')
+            if hide_keys_after_id:
+                try:
+                    page.after_cancel(hide_keys_after_id)
+                except Exception:
+                    pass
+                hide_keys_after_id = None
+
+        def reveal_keys():
+            nonlocal hide_keys_after_id
+            if key_entries and key_entries[0].cget('show') == '':
+                hide_keys()
+                return
+
+            pwd = simpledialog.askstring('显示密钥', '请输入管理员密码：', show='*', parent=page)
+            if pwd is None:
+                return
+            if pwd != self.unlock_password:
+                messagebox.showerror('错误', '密码错误')
+                return
+
+            for entry in key_entries:
+                entry.configure(show='')
+            if reveal_keys_btn:
+                reveal_keys_btn.configure(text='立即隐藏密钥')
+            if hide_keys_after_id:
+                try:
+                    page.after_cancel(hide_keys_after_id)
+                except Exception:
+                    pass
+            hide_keys_after_id = page.after(15000, hide_keys)
+
+        reveal_keys_btn = tk.Button(page, text='临时显示密钥', command=reveal_keys,
+                                    bg='white', fg='#374151', relief='flat',
+                                    highlightthickness=1, highlightbackground=BORDER,
+                                    font=('Microsoft YaHei', 9),
+                                    padx=12, pady=5, cursor='hand2')
+        reveal_keys_btn.pack(anchor='w', padx=24, pady=(0, 8))
+
         form = tk.Frame(page, bg='white')
         form.pack(fill=tk.X, padx=24)
-
-        BORDER = '#DDE3EA'
 
         def field(parent, label, var):
             row = tk.Frame(parent, bg='white')
@@ -1905,8 +1952,9 @@ class OCRApp:
                      font=('Microsoft YaHei', 9), width=22, anchor='w').pack(side=tk.LEFT)
             e = tk.Entry(row, textvariable=var, font=('Microsoft YaHei', 9),
                          relief='flat', highlightthickness=1,
-                         highlightbackground=BORDER, width=40)
+                         highlightbackground=BORDER, width=40, show='*')
             e.pack(side=tk.LEFT, ipady=5, padx=(8, 0))
+            key_entries.append(e)
             return e
 
         v_ak  = tk.StringVar(value=API_KEY)
